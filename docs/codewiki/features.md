@@ -118,7 +118,7 @@
 | 调整 swappiness | 0–100，写 `/etc/sysctl.d/99-swappiness.conf` 并 `sysctl -p` |
 | 关闭并删除 | 候选 = 已启用 + fstab 残留条目；逐个确认；全部删完后可选移除 swappiness 配置（运行时回 60） |
 
-**fstab 安全链**：备份到 `/etc/fstab.bak.<时间戳>.<序号>` → 记录 `findmnt --verify` 基线 → 修改 → 再校验 → 失败且基线正常则自动恢复。
+**fstab 安全链**：备份到 `${BK_ROOT}/<时间戳>/fstab[.N]` → 记录 `findmnt --verify` 基线 → 修改 → 再校验 → 失败且基线正常则自动恢复。同秒同目录已有同名备份时顺延序号，绝不覆盖旧备份。
 **清理**：创建中途失败或 Ctrl+C，删除半成品文件并提示 fstab 备份位置。
 
 ---

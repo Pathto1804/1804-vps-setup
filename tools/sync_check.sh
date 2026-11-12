@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-FUNCS="log warn die err_trap require_root require_tty require_distro ask_yesno ask_input ask_input_def backup_file conf_has conf_read conf_write conf_get conf_update v_any v_yesno v_user v_pubkey v_ssh_port v_ports_list conf_val sshd_port rand_port"
+FUNCS="log warn die err_trap require_root require_tty require_distro ask_yesno ask_input ask_input_def backup_file bk_prune conf_has conf_read conf_write conf_get conf_update v_any v_yesno v_user v_pubkey v_ssh_port v_ports_list conf_val sshd_port rand_port"
 SCRIPTS="01-base.sh 04-user.sh 05-ufw-ssh.sh 07-fail2ban.sh 09-bbr.sh 12-verify.sh"
 declare -i BAD=0
 for fn in $FUNCS; do
@@ -87,6 +87,7 @@ check_var() {   # check_var <变量名>
 }
 check_var CONF
 check_var BK_ROOT
+check_var BK_KEEP
 
 # ---- 交互原语一致性：只存在于有菜单的脚本（04/05/07），与公共函数分开比对 ----
 # 01/09/12 无菜单，不定义这些函数（放进公共块就是死代码）。

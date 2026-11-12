@@ -68,6 +68,7 @@ bash tools/sync_check.sh                         # 改公共函数/公共变量/
 | 2026-10-07 | 支持矩阵改为 Debian 优先 | 验收基线固定为 Debian 12 |
 | 2026-11-12 | README 增加 Git 本地执行可选方案（同一套脚本，无第二实现） | 交付形态增加，架构不变 |
 | 2026-11-12 | 交互层统一：`04/05/07` 新增 `ask_menu`/`ui_kv`/`ui_sep`/`ui_rule`/`ui_item`/`ui_quit`/`ui_abort`/`_disp_w`（`08` 自有 helper 对齐同一语义）；`05`/`07` 首次运行不再自动执行写操作；`05` 退出码改为按真实加固状态；`04` 公钥子菜单返回键 `3`→`0` | 交互契约写入 `terms.md`；`sync_check` 增加 `UI_FUNCS`/`UI_SCRIPTS` 比对 |
+| 2026-11-12 | 备份目录加保留策略：`BK_KEEP`=20、内容相同复用、`bk_prune` 裁剪；`08` fstab 备份从 `/etc/fstab.bak.*` 迁入 `BK_ROOT/<时间戳>/fstab[.N]`；`04` 加 EXIT trap 清 `authorized_keys.tmp.$$` | 目标机不再产生散落文件；`sync_check` 增加 `bk_prune` 函数与 `BK_KEEP` 变量检查 |
 | 2026-11-12 | `CONTEXT.md` 退役，知识迁入 `docs/codewiki/` | 单一知识入口，术语独立成篇 |
 
 ## 文档职责

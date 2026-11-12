@@ -39,7 +39,7 @@ tools/sync_check.sh   公共块一致性自检（唯一自动化检查）
 脚本之间**没有调用关系**，靠三样东西对齐：
 
 1. **共享 conf**（`/root/.vps-init.conf`，600，root 属主）
-2. **共享备份目录**（`/root/vps-init-backups/<时间戳>/`）
+2. **共享备份目录**（`/root/vps-init-backups/<时间戳>/`）——只保留最近 `BK_KEEP`=20 份，超出由 `bk_prune` 删最旧；内容与最新一份相同则复用该目录并刷新时间戳。裁剪只匹配 `YYYYmmdd-HHMMSS` 目录名，不触碰其他内容。
 3. **一致的内联函数**（同名函数必须到处一样）
 
 ```mermaid
@@ -65,7 +65,7 @@ conf 键的权威表格在 `README.md`「参数只输一次」一节，这里不
 | 路径 | 写入者 | 删除后 |
 |---|---|---|
 | `/root/.vps-init.conf` | 01/04/05/07 | 重新询问，不影响系统配置 |
-| `/root/vps-init-backups/<时间戳>/` | 01/04/05/07/09（08 用 `/etc/fstab.bak.*`） | 失去人工回滚副本 |
+| `/root/vps-init-backups/<时间戳>/` | 01/04/05/07/08/09（`08` 写 `fstab[.N]`，其余写各自被改文件） | 失去人工回滚副本 |
 | `/root/vps-init-report.md` | 12 | 重跑生成 |
 | `/etc/ssh/sshd_config.d/01-hardening.conf` | 05 | sshd 回到未加固状态 |
 | `/etc/fail2ban/jail.local` | 07 | 回到 fail2ban 默认（盯 22，等于失效） |

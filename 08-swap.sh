@@ -31,6 +31,9 @@ set -uo pipefail
 
 readonly FSTAB=/etc/fstab
 readonly SYSCTL_CONF=/etc/sysctl.d/99-swappiness.conf
+BK_ROOT="/root/vps-init-backups"
+# 备份目录保留份数（超出删最旧；只匹配 YYYYmmdd-HHMMSS 目录）
+BK_KEEP=20
 readonly SWAPPINESS_RE='^([0-9]|[1-9][0-9]|100)$'
 readonly MIN_SWAP_MB=64        # swap 最小值
 readonly WARN_FREE_MB=2048     # 创建 swap 后分区剩余低于此值时警告
@@ -202,8 +205,26 @@ fstab_has_entry() { awk -v p="$1" '$1==p{f=1} END{exit (f?0:1)}' "$FSTAB" 2>/dev
 
 fstab_backup() {
   FSTAB_BAK_COUNT=$((FSTAB_BAK_COUNT + 1))
-  FSTAB_BAK="$FSTAB.bak.$(date +%Y%m%d-%H%M%S).$FSTAB_BAK_COUNT"
+  local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
+  mkdir -p -- "${BK_ROOT}/${stamp}" || die "创建备份目录 ${BK_ROOT}/${stamp} 失败"
+  if (( FSTAB_BAK_COUNT > 1 )); then
+    FSTAB_BAK="${BK_ROOT}/${stamp}/fstab.${FSTAB_BAK_COUNT}"
+  else
+    FSTAB_BAK="${BK_ROOT}/${stamp}/fstab"
+  fi
+  # 同秒且同目录已有 fstab（上一次运行留下的）时顺延序号，绝不覆盖旧备份
+  while [[ -e "$FSTAB_BAK" ]]; do
+    FSTAB_BAK_COUNT=$((FSTAB_BAK_COUNT + 1))
+    FSTAB_BAK="${BK_ROOT}/${stamp}/fstab.${FSTAB_BAK_COUNT}"
+  done
   cp -a -- "$FSTAB" "$FSTAB_BAK" || die "备份 $FSTAB 失败"
+  # 只保留最近 BK_KEEP 份时间戳目录（与其余脚本同一策略，08 不进公共块故本地内联）
+  local -a dirs=(); local i
+  mapfile -t dirs < <(find "${BK_ROOT}" -mindepth 1 -maxdepth 1 -type d \
+    -regextype posix-extended -regex '.*/[0-9]{8}-[0-9]{6}' 2>/dev/null | sort)
+  if (( ${#dirs[@]} > BK_KEEP )); then
+    for (( i = 0; i < ${#dirs[@]} - BK_KEEP; i++ )); do rm -rf -- "${dirs[$i]}"; done
+  fi
   info "已备份 fstab -> $FSTAB_BAK"
 }
 

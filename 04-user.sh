@@ -11,6 +11,8 @@ shopt -s inherit_errexit
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 CONF="/root/.vps-init.conf"
 BK_ROOT="/root/vps-init-backups"
+# 备份目录保留份数（超出删最旧；bk_prune 只匹配 YYYYmmdd-HHMMSS 目录）
+BK_KEEP=20
 
 if [[ -t 1 ]]; then
   C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'; C_B=$'\e[1m'; C_D=$'\e[90m'; C_0=$'\e[0m'
@@ -24,6 +26,9 @@ die()  { printf '%s[%s]%s %s\n' "${C_R}" "${SCRIPT_NAME}" "${C_0}" "$*" >&2; exi
 
 err_trap() { die "行 ${1}: ${2}"; }
 trap 'err_trap "${LINENO}" "${BASH_COMMAND}"' ERR
+# 公钥重写用的是 <authorized_keys>.tmp.$$；异常退出时清掉半成品，不在 ~/.ssh 留残留
+AK_TMP=""
+trap 'if [[ -n "${AK_TMP}" ]]; then rm -f -- "${AK_TMP}"; fi' EXIT
 
 require_root()   { [[ "${EUID}" -eq 0 ]] || die "需要 root 运行，请用：sudo bash ${SCRIPT_NAME}"; }
 require_tty()    { [[ -t 0 ]] || die "需要交互终端运行，不支持无人值守（防锁死设计）"; }
@@ -59,14 +64,48 @@ ask_input() {
 }
 
 backup_file() {
-  local path="$1" stamp dir
+  local path="$1" stamp dir newest base
   [[ -e "${path}" ]] || { printf ''; return 0; }
+  base="$(basename "${path}")"
+  # 最新一份内容相同则不新建目录，只把它的时间戳刷新为当前时刻
+  # （不刷新会被后续备份挤成最旧，20 次后被裁剪逻辑删掉）
+  newest="$(find "${BK_ROOT}" -mindepth 1 -maxdepth 1 -type d \
+    -regextype posix-extended -regex '.*/[0-9]{8}-[0-9]{6}' 2>/dev/null | sort | tail -n 1)" || true
+  if [[ -n "${newest}" && -f "${newest}/${base}" ]] && cmp -s "${path}" "${newest}/${base}"; then
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    dir="${BK_ROOT}/${stamp}"
+    if [[ "${dir}" != "${newest}" ]]; then
+      mkdir -p "${dir}"
+      mv "${newest}/${base}" "${dir}/${base}"
+      # 只在原目录已空时移除，绝不删掉同目录里的其他备份
+      rmdir -- "${newest}" 2>/dev/null || true
+    fi
+    bk_prune
+    printf '%s%s 内容未变，复用备份 %s/%s%s\n' "${C_G}" "${path}" "${BK_ROOT}" "${stamp}" "${C_0}" >&2
+    printf '%s' "${dir}"
+    return 0
+  fi
   stamp="$(date +%Y%m%d-%H%M%S)"
   dir="${BK_ROOT}/${stamp}"
   mkdir -p "${dir}"
   cp -a "${path}" "${dir}/"
-  printf '%s已备份 %s -> %s/\n' "${C_G}" "${path}" "${dir}" >&2
+  bk_prune
+  printf '%s已备份 %s -> %s/%s\n' "${C_G}" "${path}" "${dir}" "${C_0}" >&2
   printf '%s' "${dir}"
+}
+
+# bk_prune：只保留最近 BK_KEEP 份时间戳备份目录
+# 只删严格匹配 YYYYmmdd-HHMMSS 的目录，BK_ROOT 下的其他内容一律不碰
+bk_prune() {
+  local -a dirs=()
+  local i
+  [[ -d "${BK_ROOT}" ]] || return 0
+  mapfile -t dirs < <(find "${BK_ROOT}" -mindepth 1 -maxdepth 1 -type d \
+    -regextype posix-extended -regex '.*/[0-9]{8}-[0-9]{6}' 2>/dev/null | sort)
+  (( ${#dirs[@]} > BK_KEEP )) || return 0
+  for (( i = 0; i < ${#dirs[@]} - BK_KEEP; i++ )); do
+    rm -rf -- "${dirs[$i]}"
+  done
 }
 
 # ============ 交互原语（04/05/07 一致，修改需同步三处；sync_check 比对） ============
@@ -354,6 +393,7 @@ rewrite_authorized_keys() {
     printf '%s\n' "${k}" >> "${AK_TMP}"
   done
   mv "${AK_TMP}" "${AK}"
+  AK_TMP=""        # 已落位，EXIT trap 不再清理
   chown "${ADMIN_USER}:${OWNER_GID}" "${SSH_DIR}" "${AK}"
   chmod 700 "${SSH_DIR}"; chmod 600 "${AK}"
 }
