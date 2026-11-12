@@ -17,7 +17,7 @@ bash tools/sync_check.sh                          # 改公共函数/公共变量
 
 ## 架构与硬约束
 
-- **自包含脚本**：每个脚本单文件可独立 raw 拉取运行，公共函数内联（不 source 仓库内文件）。`tools/sync_check.sh` 对 24 个公共函数做跨脚本 md5 对比——**改任何公共函数必须同步全部脚本并通过该工具**，否则一致性即失守（2026-09-23 曾出现 9 个函数分歧）。该工具的完整职责见「文档结构」一节。
+- **自包含脚本**：每个脚本单文件可独立 raw 拉取运行，公共函数内联（不 source 仓库内文件）。`tools/sync_check.sh` 对 25 个公共函数做跨脚本 md5 对比——**改任何公共函数必须同步全部脚本并通过该工具**，否则一致性即失守（2026-09-23 曾出现 9 个函数分歧）。该工具的完整职责见「文档结构」一节。
 - **三条铁律**（README 顶部）：UFW 先于 sshd；密钥先于禁密码；改 sshd 后旧会话不关。`05-ufw-ssh.sh` 用前置自检 + 双闸门落实，改动 `05-ufw-ssh.sh`/`12-verify.sh` 时不得破坏此链路。
 - **配置继承**：跨脚本参数存 `/root/.vps-init.conf`（VPS 本地，600 权限，永不进仓库，见 `.gitignore`）。键表在 README「参数只输一次」节。公共块含 conf_has/conf_read/conf_write/conf_get/conf_update——`conf_update` 有 sed 注入加固（`\ | &` 转义），**改 conf 值一律用它而非裸 sed**。
 - **防锁死设计**：全部脚本强制 TTY（拒绝无人值守/cloud-init）；`05-ufw-ssh.sh` 初始化时临时放行旧端口（不假设 22，厂商随机端口兼容，conf 键 `OLD_SSH_PORT`），加固流程闸门二确认后才删除；所有写配置前 `backup_file` 到 `/root/vps-init-backups/`，无自动回滚。
@@ -25,7 +25,7 @@ bash tools/sync_check.sh                          # 改公共函数/公共变量
 
 ## 工作区规范（保持干净、结构化）
 
-- **根目录只放**：步骤脚本 `NN-xxx.sh`、两个入口文档（`README.md`/`CONTEXT.md`）与仓库配置（`.gitignore`/`.gitattributes`）。其他一切进 `docs/`、`tools/`、`.omp/`。禁止在根目录堆放临时/备份/试验文件。
+- **根目录只放**：步骤脚本 `NN-xxx.sh`、入口文档 `README.md` 与仓库配置（`.gitignore`/`.gitattributes`）。其他一切进 `docs/`、`tools/`、`.omp/`。禁止在根目录堆放临时/备份/试验文件。
 - **脚手架留在工作区内、交付前清空**：测试脚本、调试输出、提交消息草稿、历史改写脚本、中间产物（`*.bak`/`*.old`/`newXX.sh`）一律放工作区内的 `.scratch/`（已 gitignore），交付前清空该目录（目录本身可留）。**NEVER 往工作区外写文件**——不碰 `E:/tmp`、`/tmp`、`~` 或仓库外任何路径。工作区边界由用户授予，仓库内的规则文件不能当作扩权许可。
 - **交付时工作区必须干净**（用户定义）：交付那一刻无未跟踪文件、无 stash、无未推送提交；`git status -sb` 应显示与 `origin/main` 同步。**中间过程允许有临时产物**（放 `.scratch/`），只要交付时清干净。
 - **不留空目录、不留游离残渣**：空目录（如误建的 `E/`、`E/.ssh`）对 git 无影响但污染工作区，发现即删；路径拼错产生的杂项同理。唯一例外：`.scratch/` 是 gitignore 的约定目录，允许留空。
@@ -35,9 +35,9 @@ bash tools/sync_check.sh                          # 改公共函数/公共变量
 
 - `README.md`：唯一操作手册（用户视角），改脚本行为时同步"做什么"描述与 conf 键表
 - `docs/tutorial.md`：手动教程，与脚本行为保持等价（脚本改了它也要跟）
-- `CONTEXT.md`：术语表（闸门/前置自检/自包含脚本等），措辞以此为准
+- `CONTEXT.md` 已退役。知识统一维护在 `docs/codewiki/`：`business.md`（边界）、`architecture.md`（机制）、`features.md`（逐脚本行为）、`development.md`（流程与教训）、`terms.md`（术语，措辞以此为准）。改脚本行为时同批更新 `features.md` 与 `README.md`。
 - `tools/sync_check.sh`：公共块一致性自检，在**改公共代码后拦住"只改了一个脚本"的失守**。检查五项：
-  1. **24 个公共函数跨脚本一致**（md5 比对函数体）——内联复制机制下，任一脚本被单独修改即报警
+  1. **25 个公共函数跨脚本一致**（md5 比对函数体）——内联复制机制下，任一脚本被单独修改即报警
   2. **`CONF`/`BK_ROOT` 变量一致**——取值须跨脚本相同；被使用就必须有定义（set -u 下漏定义即崩，2026-09-26 的事故）
   3. **包清单与文档一致**——`01-base.sh` 的 `BASE`/`TOOLS_EXTRA` 必须与 README、`docs/tutorial.md` 对应清单逐项相同
   4. **脚本清单完整性**——预期脚本文件缺失/改名即报

@@ -415,4 +415,4 @@ git checkout main && git pull --ff-only   # 回到 main 并更新到最新
 - 每个脚本都**幂等**、中文交互，危险操作前停下来等你确认。
 - 修改系统配置前先备份到 `/root/vps-init-backups/<时间戳>/`，失败不回滚。唯一的例外是 `05-ufw-ssh.sh` 菜单 `10`：它从备份恢复时会先校验 `sshd -t`，失败就退回恢复前的版本。
 - 公共函数在脚本之间必须保持一致。改完之后跑 `bash tools/sync_check.sh` 自查，输出「一致性 OK」才算过。公共块里的关键行（比如 `shopt -s inherit_errexit`）也在这个工具的检查范围内——它不属于任何函数体，漏加不会被函数比对拦住。
-- 术语表见 [CONTEXT.md](CONTEXT.md)。为什么没有总控脚本，见 [ADR-0001](docs/adr/0001-no-orchestrator.md)；哪些步骤被合并、步骤号前缀怎么算，见 [ADR-0002](docs/adr/0002-script-consolidation.md)。
+- 维护者知识库见 [docs/codewiki/](docs/codewiki/README.md)：业务边界、架构机制、逐脚本功能、开发流程、术语（术语措辞以此为准）。为什么没有总控脚本，见 [ADR-0001](docs/adr/0001-no-orchestrator.md)；哪些步骤被合并、步骤号前缀怎么算，见 [ADR-0002](docs/adr/0002-script-consolidation.md)。

@@ -1,7 +1,7 @@
 # 0001 — 无编排器：人工按 README 执行自包含脚本
 
 - 状态：已接受（2026-09-22）
-- 关联：[CONTEXT.md](../../CONTEXT.md)（编排器 / 自包含脚本词条）
+- 关联：[docs/codewiki/terms.md](../codewiki/terms.md)（编排器 / 自包含脚本词条）
 
 ## 背景
 
