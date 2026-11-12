@@ -46,7 +46,7 @@ ask_yesno() {
     case "${ans,,}" in
       y|yes) return 0 ;;
       n|no)  return 1 ;;
-      *)     printf '%s无效输入，请输入 y 或 n。\n' "${C_Y}" >&2 ;;
+      *)     printf '%s无效输入：请输入 y 或 n。\n' "${C_Y}" >&2 ;;
     esac
   done
 }
@@ -77,6 +77,67 @@ backup_file() {
   printf '%s已备份 %s -> %s/\n' "${C_G}" "${path}" "${dir}" >&2
   printf '%s' "${dir}"
 }
+
+# ============ 交互原语（04/05/07 一致，修改需同步三处；sync_check 比对） ============
+# 显示宽度写入全局 DW：CJK/全角按 2 列，不依赖 wc 或 locale 子进程
+_disp_w() {
+  local s="$1" i=0 w=0 c n
+  while (( i < ${#s} )); do
+    c="${s:i:1}"
+    printf -v n '%d' "'${c}"
+    (( n < 0 )) && n=$(( -n ))
+    if (( n < 128 )); then
+      w=$((w+1)); i=$((i+1))
+    elif (( n <= 255 )); then
+      # C locale：按 UTF-8 字节序列长度推进，宽字符仍按 2 列
+      if (( n >= 240 )); then w=$((w+2)); i=$((i+4))
+      elif (( n >= 224 )); then w=$((w+2)); i=$((i+3))
+      elif (( n >= 192 )); then w=$((w+1)); i=$((i+2))
+      else w=$((w+1)); i=$((i+1)); fi
+    else
+      if (( (n>=0x1100&&n<=0x115F) || (n>=0x2E80&&n<=0xA4CF) || (n>=0xAC00&&n<=0xD7A3) \
+             || (n>=0xF900&&n<=0xFAFF) || (n>=0xFE30&&n<=0xFE6F) || (n>=0xFF00&&n<=0xFF60) \
+             || (n>=0xFFE0&&n<=0xFFE6) )); then w=$((w+2)); else w=$((w+1)); fi
+      i=$((i+1))
+    fi
+  done
+  DW="${w}"
+}
+ui_sep()  { printf '%s\n' "${C_D}───────────────────────────────────${C_0}"; }
+ui_rule() { printf '%s\n' "${C_D}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_0}"; }
+ui_kv() {   # ui_kv <标签> <值>：标签列按显示宽度对齐到 12 列
+  local label="$1" val="$2" pad
+  _disp_w "${label}"; pad=$(( 12 - DW ))
+  (( pad < 1 )) && pad=1
+  printf '  %s%*s%s\n' "${label}" "${pad}" '' "${val}"
+}
+ui_item() {   # ui_item <编号> <说明>
+  printf '  %s%s%s) %s\n' "${C_G}" "$1" "${C_0}" "$2"
+}
+ui_quit() {   # ui_quit：主菜单退出项的编号行（0 = 退出）
+  printf '  %s0%s) 退出\n' "${C_R}" "${C_0}"
+}
+# ask_menu <提示> <最大编号> [零号含义=返回]：结果写入全局 UI_REPLY（0..max）
+# 空回车 = 0（返回上一层/退出）；非法输入原地重问，不重绘菜单
+ask_menu() {
+  local prompt="$1" max="$2" zero="${3:-返回}" input
+  while :; do
+    read -rp "${prompt} [0-${max}]（回车=${zero}） " input || die "输入中断"
+    input="${input:-0}"
+    if [[ "${input}" =~ ^[0-9]+$ ]] && (( input <= max )); then
+      # shellcheck disable=SC2034  # 由调用方读取
+      UI_REPLY="${input}"; return 0
+    fi
+    warn "无效输入：请输入 0-${max}"
+  done
+}
+# Ctrl-C：写操作可能只做了一半，提示幂等收敛
+ui_abort() {
+  printf '\n%s[中断]%s 已停止。若刚做过写操作，配置可能只改了一半；重跑本脚本会收敛（各步骤幂等）。\n' \
+    "${C_Y}" "${C_0}" >&2
+  exit 130
+}
+trap 'ui_abort' INT
 
 conf_has()   { grep -q "^${1}=" "${CONF}" 2>/dev/null; }
 conf_read()  { sed -n "s/^${1}='\\(.*\\)'\$/\\1/p" "${CONF}" 2>/dev/null | head -n 1 || true; }   # || true：conf 缺失或 head 早退（SIGPIPE）时输出空串，不中断
@@ -376,26 +437,25 @@ do_status() {
 
 do_allow() {
   local op ports protos src p proto
-  printf '  1) tcp   2) udp   3) tcp+udp\n'
-  op=""
-  while :; do
-    read -rp "选择协议 [1-3]（回车取消） " op || die "输入中断"
-    [[ -z "${op}" ]] && return 0
-    if [[ "${op}" == "1" || "${op}" == "2" || "${op}" == "3" ]]; then break; fi
-    printf '请输入 1、2 或 3。\n'
-  done
+  ui_item 1 "tcp"
+  ui_item 2 "udp"
+  ui_item 3 "tcp+udp"
+  printf '  %s0%s) 返回\n' "${C_R}" "${C_0}"
+  ask_menu "选择协议" 3
+  op="${UI_REPLY}"
+  [[ "${op}" == "0" ]] && return 0
   ports=""
   while :; do
-    read -rp "端口（1-65535，逗号分隔可多个） " ports || die "输入中断"
-    if [[ -z "${ports}" ]]; then printf '端口不能为空。\n'; continue; fi
+    read -rp "端口（1-65535，逗号分隔可多个；回车=返回） " ports || die "输入中断"
+    [[ -z "${ports}" ]] && return 0
     if v_ports_list "${ports}"; then break; fi
   done
   src=""
   if ask_yesno "限制来源 IP（如 1.2.3.4 或 10.0.0.0/8）？" n; then
     while :; do
-      read -rp "来源地址 " src || die "输入中断"
+      read -rp "来源地址（回车=返回） " src || die "输入中断"
       [[ -n "${src}" ]] && break
-      printf '来源地址不能为空。\n'
+      return 0
     done
   fi
   case "${op}" in
@@ -432,10 +492,10 @@ do_delete() {
   if [[ "${count}" == "0" ]]; then log "当前没有可删除的规则"; return 0; fi
   num=""
   while :; do
-    read -rp "删除第几条？[1-${count}]（回车取消） " num || die "输入中断"
+    read -rp "删除第几条？[1-${count}]（回车=返回） " num || die "输入中断"
     [[ -z "${num}" ]] && return 0
     if [[ "${num}" =~ ^[0-9]+$ ]] && (( num >= 1 )) && (( num <= count )); then break; fi
-    printf '编号超出范围，重填。\n'
+    warn "无效输入：请输入 1-${count}"
   done
   rule="$(fw_rule_line "${num}")"
   if [[ -z "${rule}" ]]; then warn "未找到编号 ${num} 的规则（列表可能已变化）"; return 0; fi
@@ -485,22 +545,18 @@ do_default() {
   local which val
   fw_refresh
   log "当前默认策略：入站 $(fw_default_in) / 出站 $(fw_default_out)"
-  printf '  1) 入站 incoming   2) 出站 outgoing\n'
-  which=""
-  while :; do
-    read -rp "改哪一项？[1-2]（回车取消） " which || die "输入中断"
-    [[ -z "${which}" ]] && return 0
-    if [[ "${which}" == "1" || "${which}" == "2" ]]; then break; fi
-    printf '请输入 1 或 2。\n'
-  done
-  printf '  1) allow（放行）   2) deny（拒绝）\n'
-  val=""
-  while :; do
-    read -rp "设为？[1-2]（回车取消） " val || die "输入中断"
-    [[ -z "${val}" ]] && return 0
-    if [[ "${val}" == "1" || "${val}" == "2" ]]; then break; fi
-    printf '请输入 1 或 2。\n'
-  done
+  ui_item 1 "入站 incoming"
+  ui_item 2 "出站 outgoing"
+  printf '  %s0%s) 返回\n' "${C_R}" "${C_0}"
+  ask_menu "改哪一项" 2
+  which="${UI_REPLY}"
+  [[ "${which}" == "0" ]] && return 0
+  ui_item 1 "allow（放行）"
+  ui_item 2 "deny（拒绝）"
+  printf '  %s0%s) 返回\n' "${C_R}" "${C_0}"
+  ask_menu "设为" 2
+  val="${UI_REPLY}"
+  [[ "${val}" == "0" ]] && return 0
   case "${val}" in
     1) val="allow" ;;
     *) val="deny" ;;
@@ -527,9 +583,9 @@ do_ports() {
   cur="$(conf_val ALLOWED_PORTS)"
   printf '当前业务端口清单：%s\n' "${cur:-(空)}"
   if [[ -n "${cur}" ]]; then
-    new="$(ask_input_def "业务端口（逗号分隔）" v_ports_list "${cur}")"
+    new="$(ask_input_def "业务端口（逗号分隔，回车=返回）" v_ports_list "${cur}")"
   else
-    new="$(ask_input "业务端口（逗号分隔，如 80,443；回车=留空）" v_ports_list)"
+    new="$(ask_input "业务端口（逗号分隔，如 80,443；回车=不修改）" v_ports_list)"
   fi
   if [[ "${new}" == "${cur}" ]]; then log "清单未变化"; return 0; fi
   conf_update "ALLOWED_PORTS" "${new}"
@@ -733,10 +789,10 @@ do_restore() {
   done
   pick=""
   while :; do
-    read -rp "恢复第几份？[1-${#backs[@]}]（回车取消） " pick || die "输入中断"
+    read -rp "恢复第几份？[1-${#backs[@]}]（回车=返回） " pick || die "输入中断"
     [[ -z "${pick}" ]] && return 0
     if [[ "${pick}" =~ ^[0-9]+$ ]] && (( pick >= 1 )) && (( pick <= ${#backs[@]} )); then break; fi
-    printf '编号超出范围，重填。\n'
+    warn "无效输入：请输入 1-${#backs[@]}"
   done
   d="${backs[$((pick - 1))]}"
   printf '将用 %s01-hardening.conf 覆盖 %s，内容：\n' "${d}" "${HARD}"
@@ -803,17 +859,15 @@ if ! v_user "${ADMIN_USER}" >/dev/null 2>&1; then
   conf_update "ADMIN_USER" "${ADMIN_USER}"
 fi
 
-# 未加固则接着走加固流程。ufw 未启用时不硬闯（铁律：UFW 先于 sshd），
-# 只提示走菜单 1 —— 否则 do_apply 的前置自检会 die 成死胡同（重跑还是同一条路）
+# 未加固不自动闯流程：只做一屏检测结果 + 建议，由用户从菜单选
 fw_refresh
 if is_hardened; then
   log "SSH 已按本脚本策略加固，进入维护菜单（按 0 退出）"
 elif [[ "$(fw_state)" == "active" ]]; then
-  log "SSH 尚未加固，进入加固流程"
-  do_apply
-  log "加固流程结束，进入维护菜单（按 0 退出）"
+  log "SSH 尚未加固，ufw 已启用：建议先按 2 走加固流程（双闸门）"
+  log "进入维护菜单（按 0 退出）"
 else
-  warn "SSH 未加固，且 ufw 当前未启用：请先用菜单 1 初始化 / 重新应用防火墙，再回来用菜单 2 加固（铁律：UFW 先于 sshd）"
+  warn "SSH 未加固，且 ufw 当前未启用：先按 1 初始化 / 重新应用防火墙，再回来按 2 加固（铁律：UFW 先于 sshd）"
   log "进入维护菜单（按 0 退出）"
 fi
 
@@ -851,40 +905,36 @@ while :; do
   else
     UFW_DESC="${C_Y}${SSH_PORT}/tcp 未放行 ⚠${C_0}"
   fi
-  printf '%s\n' "${C_D}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_0}"
+  ui_rule
   printf '%s 防火墙 + SSH 加固 · %s%s\n' "${C_B}" "${C_G}" "${ADMIN_USER}"
-  printf '%s\n' "${C_D}───────────────────────────────────${C_0}"
-  printf '  防火墙      %b\n' "${F_STATE_DESC}"
-  printf '  默认策略    入站 %s / 出站 %s\n' "$(fw_default_in)" "$(fw_default_out)"
-  printf '  规则数      %s\n' "${F_RULES}"
-  printf '  SSH 端口    %b\n' "${F_SSH_DESC}"
-  printf '  业务端口    %s\n' "${F_PORTS:-(空)}"
-  printf '%s\n' "${C_D}───────────────────────────────────${C_0}"
-  printf '  root 登录   %s\n' "${E_ROOT}"
-  printf '  密码登录    %s\n' "${E_PWD}"
-  printf '  AllowUsers  %b\n' "${E_USERS}"
-  printf '  MaxAuthTries %s\n' "${E_TRIES}"
-  printf '  加固文件    %b\n' "${HARD_DESC}"
-  printf '  ufw 放行    %b\n' "${UFW_DESC}"
-  printf '%s\n' "${C_D}───────────────────────────────────${C_0}"
-  printf '  %s1%s) 防火墙初始化 / 重新应用（默认拒绝入站 + 放行 SSH 与业务端口）\n' "${C_G}" "${C_0}"
-  printf '  %s2%s) SSH 加固 / 重新应用（写 01-hardening.conf，双闸门）\n' "${C_G}" "${C_0}"
-  printf '  %s3%s) 状态总览（ufw 规则 + sshd 生效值 + 加固文件 + drop-in 覆盖）\n' "${C_G}" "${C_0}"
-  printf '  %s4%s) 放行端口（allow，可限来源 IP）\n' "${C_G}" "${C_0}"
-  printf '  %s5%s) 删除规则（按编号）\n' "${C_G}" "${C_0}"
-  printf '  %s6%s) 启用 / 禁用防火墙\n' "${C_G}" "${C_0}"
-  printf '  %s7%s) 修改默认策略（入站 / 出站）\n' "${C_G}" "${C_0}"
-  printf '  %s8%s) 修改业务端口清单（conf ALLOWED_PORTS，并按清单增删规则）\n' "${C_G}" "${C_0}"
-  printf '  %s9%s) 修改参数（SSH 端口 / 管理员用户，写入 conf）\n' "${C_G}" "${C_0}"
-  printf '  %s10%s) 从备份恢复 01-hardening.conf\n' "${C_G}" "${C_0}"
-  printf '  %s0%s) 退出\n' "${C_R}" "${C_0}"
-  printf '%s\n' "${C_D}───────────────────────────────────${C_0}"
-  OP=""
-  while :; do
-    read -rp "选择操作 [0-10] " OP || die "输入中断"
-    if [[ "${OP}" =~ ^([0-9]|10)$ ]]; then break; fi
-    printf '请输入 0-10。\n'
-  done
+  ui_sep
+  ui_kv "防火墙" "${F_STATE_DESC}"
+  ui_kv "默认策略" "入站 $(fw_default_in) / 出站 $(fw_default_out)"
+  ui_kv "规则数" "${F_RULES}"
+  ui_kv "SSH 端口" "${F_SSH_DESC}"
+  ui_kv "业务端口" "${F_PORTS:-(空)}"
+  ui_sep
+  ui_kv "root 登录" "${E_ROOT}"
+  ui_kv "密码登录" "${E_PWD}"
+  ui_kv "AllowUsers" "${E_USERS}"
+  ui_kv "MaxAuthTries" "${E_TRIES}"
+  ui_kv "加固文件" "${HARD_DESC}"
+  ui_kv "ufw 放行" "${UFW_DESC}"
+  ui_sep
+  ui_item 1 "防火墙初始化 / 重新应用（默认拒绝入站 + 放行 SSH 与业务端口）"
+  ui_item 2 "SSH 加固 / 重新应用（写 01-hardening.conf，双闸门）"
+  ui_item 3 "状态总览（ufw 规则 + sshd 生效值 + 加固文件 + drop-in 覆盖）"
+  ui_item 4 "放行端口（allow，可限来源 IP）"
+  ui_item 5 "删除规则（按编号）"
+  ui_item 6 "启用 / 禁用防火墙"
+  ui_item 7 "修改默认策略（入站 / 出站）"
+  ui_item 8 "修改业务端口清单（conf ALLOWED_PORTS，并按清单增删规则）"
+  ui_item 9 "修改参数（SSH 端口 / 管理员用户，写入 conf）"
+  ui_item 10 "从备份恢复 01-hardening.conf"
+  ui_quit
+  ui_sep
+  ask_menu "选择操作" 10 "退出"
+  OP="${UI_REPLY}"
   case "${OP}" in
     0) break ;;
     1) do_init ;;
@@ -900,5 +950,13 @@ while :; do
   esac
 done
 
-log "第 5–6 步完成"
+# 完成语以真实状态为准：加固文件已写 + sshd 生效端口与 conf 一致，才算第 5–6 步完成
+fw_refresh
+if is_hardened && [[ "$(sshd_port)" == "${SSH_PORT}" ]]; then
+  log "第 5–6 步完成"
+else
+  warn "第 5–6 步未完成：SSH 尚未按本脚本策略加固，或 sshd 实际端口与 conf 不一致（conf ${SSH_PORT} / 实际 $(sshd_port)）"
+  warn "  回菜单 2 走加固流程；12-verify.sh 在同状态下同样判红"
+  exit 1
+fi
 log "提醒：云平台安全组要同步放行（ufw 放行 ≠ 云安全组放行），两边不一致就是服务不通的常见坑"

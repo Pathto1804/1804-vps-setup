@@ -88,6 +88,41 @@ check_var() {   # check_var <变量名>
 check_var CONF
 check_var BK_ROOT
 
+# ---- 交互原语一致性：只存在于有菜单的脚本（04/05/07），与公共函数分开比对 ----
+# 01/09/12 无菜单，不定义这些函数（放进公共块就是死代码）。
+UI_FUNCS="_disp_w ui_sep ui_rule ui_kv ui_item ui_quit ask_menu ui_abort"
+UI_SCRIPTS="04-user.sh 05-ufw-ssh.sh 07-fail2ban.sh"
+for fn in ${UI_FUNCS}; do
+  declare -A UH=()
+  for f in ${UI_SCRIPTS}; do
+    [[ -f "$f" ]] || continue
+    line=$(grep "^${fn}()" "$f" 2>/dev/null | head -1 || true)
+    if [[ -z "$line" ]]; then
+      echo "❌ ${f} 缺少交互原语 ${fn}()"
+      BAD+=1
+      continue
+    fi
+    if [[ "$line" == *"{"* ]] && [[ "$line" != *"}"* ]]; then
+      body=$(sed -n "/^${fn}() {/,/^\}/p" "$f")
+    else
+      body="$line"
+    fi
+    h=$(printf '%s' "$body" | md5sum | cut -c1-8)
+    UH[$h]="${UH[$h]:-} $f"
+  done
+  c=0; for _ in "${!UH[@]}"; do c=$((c+1)); done
+  if [[ $c -gt 1 ]]; then
+    echo "❌ 交互原语 ${fn} 被改散（${c} 种）："
+    for h in "${!UH[@]}"; do echo "    ${UH[$h]}"; done
+    BAD+=1
+  fi
+done
+# trap 在函数体外，不进函数体 md5 比对，单独查行
+for f in ${UI_SCRIPTS}; do
+  [[ -f "$f" ]] || continue
+  grep -qxF "trap 'ui_abort' INT" "$f" || { echo "❌ ${f} 缺少关键行：trap 'ui_abort' INT"; BAD+=1; }
+done
+
 # ---- 关键行存在性：属于公共块、但不进函数体 md5 比对的行（漏加不会被上面拦住）----
 check_line() {   # check_line <字面量行>：SCRIPTS 中每个脚本都必须整行包含该行
   local pat="$1" f

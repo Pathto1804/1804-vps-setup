@@ -18,6 +18,7 @@ bash tools/sync_check.sh                         # 改公共函数/公共变量/
 |---|---|
 | 公共内联块的任何函数/变量 | 同步 `01/04/05/07/09/12`（`08` 只需保证 `CONF`/`BK_ROOT` 已定义）→ `sync_check` → `bash -n` + `shellcheck` |
 | 新增公共函数 | 加进 `tools/sync_check.sh` 的 `FUNCS` → 否则一致性失守无人发现 |
+| 新增/修改交互原语（`ui_*`、`ask_menu`） | 同步 `04/05/07` 三处 → `sync_check` 的 `UI_FUNCS` 比对；`trap 'ui_abort' INT` 单独查行 |
 | 增加/删除 `BASE` 或 `TOOLS_EXTRA` 项 | 同步 `README.md` 与 `docs/tutorial.md` 的清单 → `sync_check` |
 | 新增/改名/删除脚本文件 | 同步 `sync_check` 的 `SCRIPTS` / `ALL_SCRIPTS` → 预期清单也要改 |
 | 改 `05-ufw-ssh.sh` | 必须真机全链路：两次闸门 + 新终端登录 + `12-verify.sh` 全绿 |
@@ -66,6 +67,7 @@ bash tools/sync_check.sh                         # 改公共函数/公共变量/
 | 2026-10-06 | `01+02` → `01-base.sh`，`05+06` → `05-ufw-ssh.sh`，步骤号不重排 | 公共块拷贝 8 → 6（ADR-0002） |
 | 2026-10-07 | 支持矩阵改为 Debian 优先 | 验收基线固定为 Debian 12 |
 | 2026-11-12 | README 增加 Git 本地执行可选方案（同一套脚本，无第二实现） | 交付形态增加，架构不变 |
+| 2026-11-12 | 交互层统一：`04/05/07` 新增 `ask_menu`/`ui_kv`/`ui_sep`/`ui_rule`/`ui_item`/`ui_quit`/`ui_abort`/`_disp_w`（`08` 自有 helper 对齐同一语义）；`05`/`07` 首次运行不再自动执行写操作；`05` 退出码改为按真实加固状态；`04` 公钥子菜单返回键 `3`→`0` | 交互契约写入 `terms.md`；`sync_check` 增加 `UI_FUNCS`/`UI_SCRIPTS` 比对 |
 | 2026-11-12 | `CONTEXT.md` 退役，知识迁入 `docs/codewiki/` | 单一知识入口，术语独立成篇 |
 
 ## 文档职责

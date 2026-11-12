@@ -46,7 +46,7 @@ ask_yesno() {
     case "${ans,,}" in
       y|yes) return 0 ;;
       n|no)  return 1 ;;
-      *)     printf '%s无效输入，请输入 y 或 n。\n' "${C_Y}" >&2 ;;
+      *)     printf '%s无效输入：请输入 y 或 n。\n' "${C_Y}" >&2 ;;
     esac
   done
 }
@@ -78,6 +78,67 @@ backup_file() {
   printf '%s已备份 %s -> %s/\n' "${C_G}" "${path}" "${dir}" >&2
   printf '%s' "${dir}"
 }
+
+# ============ 交互原语（04/05/07 一致，修改需同步三处；sync_check 比对） ============
+# 显示宽度写入全局 DW：CJK/全角按 2 列，不依赖 wc 或 locale 子进程
+_disp_w() {
+  local s="$1" i=0 w=0 c n
+  while (( i < ${#s} )); do
+    c="${s:i:1}"
+    printf -v n '%d' "'${c}"
+    (( n < 0 )) && n=$(( -n ))
+    if (( n < 128 )); then
+      w=$((w+1)); i=$((i+1))
+    elif (( n <= 255 )); then
+      # C locale：按 UTF-8 字节序列长度推进，宽字符仍按 2 列
+      if (( n >= 240 )); then w=$((w+2)); i=$((i+4))
+      elif (( n >= 224 )); then w=$((w+2)); i=$((i+3))
+      elif (( n >= 192 )); then w=$((w+1)); i=$((i+2))
+      else w=$((w+1)); i=$((i+1)); fi
+    else
+      if (( (n>=0x1100&&n<=0x115F) || (n>=0x2E80&&n<=0xA4CF) || (n>=0xAC00&&n<=0xD7A3) \
+             || (n>=0xF900&&n<=0xFAFF) || (n>=0xFE30&&n<=0xFE6F) || (n>=0xFF00&&n<=0xFF60) \
+             || (n>=0xFFE0&&n<=0xFFE6) )); then w=$((w+2)); else w=$((w+1)); fi
+      i=$((i+1))
+    fi
+  done
+  DW="${w}"
+}
+ui_sep()  { printf '%s\n' "${C_D}───────────────────────────────────${C_0}"; }
+ui_rule() { printf '%s\n' "${C_D}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_0}"; }
+ui_kv() {   # ui_kv <标签> <值>：标签列按显示宽度对齐到 12 列
+  local label="$1" val="$2" pad
+  _disp_w "${label}"; pad=$(( 12 - DW ))
+  (( pad < 1 )) && pad=1
+  printf '  %s%*s%s\n' "${label}" "${pad}" '' "${val}"
+}
+ui_item() {   # ui_item <编号> <说明>
+  printf '  %s%s%s) %s\n' "${C_G}" "$1" "${C_0}" "$2"
+}
+ui_quit() {   # ui_quit：主菜单退出项的编号行（0 = 退出）
+  printf '  %s0%s) 退出\n' "${C_R}" "${C_0}"
+}
+# ask_menu <提示> <最大编号> [零号含义=返回]：结果写入全局 UI_REPLY（0..max）
+# 空回车 = 0（返回上一层/退出）；非法输入原地重问，不重绘菜单
+ask_menu() {
+  local prompt="$1" max="$2" zero="${3:-返回}" input
+  while :; do
+    read -rp "${prompt} [0-${max}]（回车=${zero}） " input || die "输入中断"
+    input="${input:-0}"
+    if [[ "${input}" =~ ^[0-9]+$ ]] && (( input <= max )); then
+      # shellcheck disable=SC2034  # 由调用方读取
+      UI_REPLY="${input}"; return 0
+    fi
+    warn "无效输入：请输入 0-${max}"
+  done
+}
+# Ctrl-C：写操作可能只做了一半，提示幂等收敛
+ui_abort() {
+  printf '\n%s[中断]%s 已停止。若刚做过写操作，配置可能只改了一半；重跑本脚本会收敛（各步骤幂等）。\n' \
+    "${C_Y}" "${C_0}" >&2
+  exit 130
+}
+trap 'ui_abort' INT
 
 conf_has()   { grep -q "^${1}=" "${CONF}" 2>/dev/null; }
 conf_read()  { sed -n "s/^${1}='\\(.*\\)'\$/\\1/p" "${CONF}" 2>/dev/null | head -n 1 || true; }   # || true：conf 缺失或 head 早退（SIGPIPE）时输出空串，不中断
@@ -297,14 +358,12 @@ do_ban() {
     warn "fail2ban 未运行或 sshd jail 未启用，先执行菜单 1"
     return 0
   fi
-  printf '  1) 封禁 IP   2) 解封 IP\n'
-  op=""
-  while :; do
-    read -rp "选择操作 [1-2]（回车取消） " op || die "输入中断"
-    [[ -z "${op}" ]] && return 0
-    if [[ "${op}" == "1" || "${op}" == "2" ]]; then break; fi
-    printf '请输入 1 或 2。\n'
-  done
+  ui_item 1 "封禁 IP"
+  ui_item 2 "解封 IP"
+  printf '  %s0%s) 返回\n' "${C_R}" "${C_0}"
+  ask_menu "选择操作" 2
+  op="${UI_REPLY}"
+  [[ "${op}" == "0" ]] && return 0
   ip="$(ask_input "IP 地址" v_ip)"
   if [[ "${op}" == "1" ]]; then
     if ask_yesno "确认封禁 ${ip}？" n; then
@@ -327,11 +386,10 @@ require_root
 require_tty
 require_distro
 
-# 首次运行（conf 无 fail2ban 参数）自动完成安装与配置，之后进维护菜单
+# 首次运行不自动安装：只提示未配置，由用户从菜单选 1
 # 这里不写"完成"字样：配置是否真的生效由退出前的 jail 状态判定
 if ! conf_has "F2B_BANTIME"; then
-  log "首次运行：安装并配置 fail2ban"
-  do_apply
+  warn "首次运行：fail2ban 尚未按本脚本策略配置，请从菜单 1 开始（会安装 fail2ban 并写 jail.local）"
   log "进入维护菜单（按 0 退出）"
 fi
 
@@ -383,26 +441,22 @@ while :; do
     PORT_DESC="${C_Y}jail ${J_PORT} != sshd 实际 ${A_PORT} ⚠${C_0}"
   fi
 
-  printf '%s\n' "${C_D}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_0}"
+  ui_rule
   printf '%s fail2ban · sshd jail\n' "${C_B}"
-  printf '%s\n' "${C_D}───────────────────────────────────${C_0}"
-  printf '  服务        %b\n' "${F2B_DESC}"
-  printf '  jail 状态   %b\n' "${JAIL_DESC}"
-  printf '  参数        %b\n' "${P_DESC}"
-  printf '  端口        %b\n' "${PORT_DESC}"
-  printf '%s\n' "${C_D}───────────────────────────────────${C_0}"
-  printf '  %s1%s) 应用 / 重新应用配置（安装 fail2ban + 写 jail.local + 重启 + 验证）\n' "${C_G}" "${C_0}"
-  printf '  %s2%s) 查看状态详情（jail.local 内容 / 封禁列表 / 服务日志）\n' "${C_G}" "${C_0}"
-  printf '  %s3%s) 修改参数（封禁时长 / 统计窗口 / 重试次数 → conf，可选立即应用）\n' "${C_G}" "${C_0}"
-  printf '  %s4%s) 封禁 / 解封 IP\n' "${C_G}" "${C_0}"
-  printf '  %s0%s) 退出\n' "${C_R}" "${C_0}"
-  printf '%s\n' "${C_D}───────────────────────────────────${C_0}"
-  OP=""
-  while :; do
-    read -rp "选择操作 [0-4] " OP || die "输入中断"
-    if [[ "${OP}" =~ ^[0-4]$ ]]; then break; fi
-    printf '请输入 0-4。\n'
-  done
+  ui_sep
+  ui_kv "服务" "${F2B_DESC}"
+  ui_kv "jail 状态" "${JAIL_DESC}"
+  ui_kv "参数" "${P_DESC}"
+  ui_kv "端口" "${PORT_DESC}"
+  ui_sep
+  ui_item 1 "应用 / 重新应用配置（安装 fail2ban + 写 jail.local + 重启 + 验证）"
+  ui_item 2 "查看状态详情（jail.local 内容 / 封禁列表 / 服务日志）"
+  ui_item 3 "修改参数（封禁时长 / 统计窗口 / 重试次数 → conf，可选立即应用）"
+  ui_item 4 "封禁 / 解封 IP"
+  ui_quit
+  ui_sep
+  ask_menu "选择操作" 4 "退出"
+  OP="${UI_REPLY}"
   case "${OP}" in
     0) break ;;
     1) do_apply ;;

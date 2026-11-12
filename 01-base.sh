@@ -47,7 +47,7 @@ ask_yesno() {
     case "${ans,,}" in
       y|yes) return 0 ;;
       n|no)  return 1 ;;
-      *)     printf '%s无效输入，请输入 y 或 n。\n' "${C_Y}" >&2 ;;
+      *)     printf '%s无效输入：请输入 y 或 n。\n' "${C_Y}" >&2 ;;
     esac
   done
 }

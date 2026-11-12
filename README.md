@@ -159,7 +159,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Pathto1804/myVPS/main/04-use
 bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/Pathto1804/myVPS/main/04-user.sh)
 ```
 
-这是个**菜单式**脚本。你先选目标用户——新建一个，或者管理已有的；conf 会记住你上次操作的用户——然后进入主菜单。菜单一次只做一件事，按 `0` 退出。
+这是个**菜单式**脚本。你先选目标用户——新建一个，或者管理已有的；conf 会记住你上次操作的用户——然后进入主菜单。菜单一次只做一件事，按 `0` 或直接回车退出；子菜单里按 `0` 返回上一层。
 
 三个菜单项：
 
@@ -181,9 +181,9 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/Pathto18
 
 这是整个流程里**唯一能把你锁在门外**的脚本，请认真读这一节。
 
-它同样是**菜单式**的：首次运行先做防火墙初始化，紧接着走 SSH 加固流程（两道闸门），之后进入维护菜单。一次只做一件事，按 `0` 退出。如果 ufw 还没启用，脚本不会硬闯 sshd 加固——那是铁律一（UFW 先于 sshd）在拦着，它只会提示你先用菜单 `1`。
+它同样是**菜单式**的：首次运行只做一屏状态检测、给出建议，**不会自动执行任何写操作**——防火墙初始化和 SSH 加固都由你从菜单选。一次只做一件事，按 `0` 或直接回车退出。如果 ufw 还没启用，脚本不会硬闯 sshd 加固——那是铁律一（UFW 先于 sshd）在拦着，它只会提示你先用菜单 `1`。
 
-### 防火墙初始化（菜单 `1`，首次运行自动跑）
+### 防火墙初始化（菜单 `1`）
 
 - ufw 默认拒绝入站、允许出站。
 - 放行新 SSH 端口。首次询问时**直接回车就用随机端口**，也可以自己输入。
@@ -191,7 +191,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/Pathto18
 - 按需放行业务端口。
 - **启用前自检**：新端口必须已在放行列表里；没放行就拒绝启用。这是防锁死的关键一环。注意 ufw 未启用时 `ufw status` 不列规则，所以这个自检读的是 `ufw show added`。
 
-### SSH 加固（菜单 `2`，未加固时首次运行自动接着跑）
+### SSH 加固（菜单 `2`，两步闸门）
 
 - 写 `/etc/ssh/sshd_config.d/01-hardening.conf`：改端口（conf 里已有就沿用，菜单 `1` 已经存过了，不用再输）、禁 root 登录、禁密码认证（只留密钥）、用 `AllowUsers` 限定管理员、`MaxAuthTries 3`。
 - `01-` 前缀是为了抢在云镜像的 `50-cloud-init.conf` 之前拿到优先权——sshd 配置是**先出现者优先**。
@@ -229,9 +229,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Pathto1804/myVPS/main/07-fai
 bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/Pathto1804/myVPS/main/07-fail2ban.sh)
 ```
 
-**菜单式**脚本：首次运行自动安装并配置，之后进入维护菜单，一次只做一件事，按 `0` 退出。
+**菜单式**脚本：首次运行只提示"尚未按本脚本策略配置"，**不会自动安装**——安装与写配置由你从菜单 `1` 发起。之后进入维护菜单，一次只做一件事，按 `0` 或直接回车退出。
 
-### 应用配置（菜单 `1`，首次运行自动跑）
+### 应用配置（菜单 `1`）
 
 - 写 `/etc/fail2ban/jail.local`：sshd jail 监听**新端口**（不写这一条的话，fail2ban 默认盯着 22，形同虚设），`backend = systemd`（兼容 Debian 12 没有 auth.log、以及 Ubuntu 24.04+ 的情况）。
 - 默认是激进档：封 24 小时 / 统计窗口 10 分钟 / 3 次触发。首次运行会逐项询问，回车取默认值。

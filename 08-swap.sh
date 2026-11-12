@@ -102,8 +102,13 @@ ask_option() {
       printf '  %d) %s\n' "$((i + 1))" "${opts[$i]}"
     done
     [[ -n "$zero_label" ]] && printf '  0) %s\n' "$zero_label"
-    printf '请输入编号 [%d-%d]: ' "$lo" "$max"
+    printf '请输入编号 [%d-%d]（回车=返回）: ' "$lo" "$max"
     read -r input || die "输入中断，退出"
+    input="${input//[[:space:]]/}"
+    if [[ -z "$input" ]]; then
+      ANSWER=""
+      return 0
+    fi
     if [[ "$input" == "0" && -n "$zero_label" ]]; then
       ANSWER="$zero_label"
       return 0
@@ -386,6 +391,7 @@ do_create() {
 
   ask_option "请选择 Swap 大小（物理内存: $mem_h）" "${size_opts[@]}"
   size_label=$ANSWER
+  [[ -z "$size_label" ]] && { info "已取消。"; return 0; }
   case "$size_label" in
     "1G"*) size_mb=1024 ;;
     "2G"*) size_mb=2048 ;;
@@ -633,6 +639,7 @@ main_menu() {
       "$M_SWAPPINESS") do_swappiness ;;
       "$M_DELETE")     do_delete ;;
       "$M_QUIT")       info "再见！"; exit 0 ;;
+      "")              info "再见！"; exit 0 ;;   # 空回车 = 退出
     esac
   done
 }

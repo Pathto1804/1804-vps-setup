@@ -45,7 +45,7 @@ ask_yesno() {
     case "${ans,,}" in
       y|yes) return 0 ;;
       n|no)  return 1 ;;
-      *)     printf '%s无效输入，请输入 y 或 n。\n' "${C_Y}" >&2 ;;
+      *)     printf '%s无效输入：请输入 y 或 n。\n' "${C_Y}" >&2 ;;
     esac
   done
 }
@@ -68,6 +68,67 @@ backup_file() {
   printf '%s已备份 %s -> %s/\n' "${C_G}" "${path}" "${dir}" >&2
   printf '%s' "${dir}"
 }
+
+# ============ 交互原语（04/05/07 一致，修改需同步三处；sync_check 比对） ============
+# 显示宽度写入全局 DW：CJK/全角按 2 列，不依赖 wc 或 locale 子进程
+_disp_w() {
+  local s="$1" i=0 w=0 c n
+  while (( i < ${#s} )); do
+    c="${s:i:1}"
+    printf -v n '%d' "'${c}"
+    (( n < 0 )) && n=$(( -n ))
+    if (( n < 128 )); then
+      w=$((w+1)); i=$((i+1))
+    elif (( n <= 255 )); then
+      # C locale：按 UTF-8 字节序列长度推进，宽字符仍按 2 列
+      if (( n >= 240 )); then w=$((w+2)); i=$((i+4))
+      elif (( n >= 224 )); then w=$((w+2)); i=$((i+3))
+      elif (( n >= 192 )); then w=$((w+1)); i=$((i+2))
+      else w=$((w+1)); i=$((i+1)); fi
+    else
+      if (( (n>=0x1100&&n<=0x115F) || (n>=0x2E80&&n<=0xA4CF) || (n>=0xAC00&&n<=0xD7A3) \
+             || (n>=0xF900&&n<=0xFAFF) || (n>=0xFE30&&n<=0xFE6F) || (n>=0xFF00&&n<=0xFF60) \
+             || (n>=0xFFE0&&n<=0xFFE6) )); then w=$((w+2)); else w=$((w+1)); fi
+      i=$((i+1))
+    fi
+  done
+  DW="${w}"
+}
+ui_sep()  { printf '%s\n' "${C_D}───────────────────────────────────${C_0}"; }
+ui_rule() { printf '%s\n' "${C_D}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_0}"; }
+ui_kv() {   # ui_kv <标签> <值>：标签列按显示宽度对齐到 12 列
+  local label="$1" val="$2" pad
+  _disp_w "${label}"; pad=$(( 12 - DW ))
+  (( pad < 1 )) && pad=1
+  printf '  %s%*s%s\n' "${label}" "${pad}" '' "${val}"
+}
+ui_item() {   # ui_item <编号> <说明>
+  printf '  %s%s%s) %s\n' "${C_G}" "$1" "${C_0}" "$2"
+}
+ui_quit() {   # ui_quit：主菜单退出项的编号行（0 = 退出）
+  printf '  %s0%s) 退出\n' "${C_R}" "${C_0}"
+}
+# ask_menu <提示> <最大编号> [零号含义=返回]：结果写入全局 UI_REPLY（0..max）
+# 空回车 = 0（返回上一层/退出）；非法输入原地重问，不重绘菜单
+ask_menu() {
+  local prompt="$1" max="$2" zero="${3:-返回}" input
+  while :; do
+    read -rp "${prompt} [0-${max}]（回车=${zero}） " input || die "输入中断"
+    input="${input:-0}"
+    if [[ "${input}" =~ ^[0-9]+$ ]] && (( input <= max )); then
+      # shellcheck disable=SC2034  # 由调用方读取
+      UI_REPLY="${input}"; return 0
+    fi
+    warn "无效输入：请输入 0-${max}"
+  done
+}
+# Ctrl-C：写操作可能只做了一半，提示幂等收敛
+ui_abort() {
+  printf '\n%s[中断]%s 已停止。若刚做过写操作，配置可能只改了一半；重跑本脚本会收敛（各步骤幂等）。\n' \
+    "${C_Y}" "${C_0}" >&2
+  exit 130
+}
+trap 'ui_abort' INT
 
 conf_has()   { grep -q "^${1}=" "${CONF}" 2>/dev/null; }
 conf_read()  { sed -n "s/^${1}='\\(.*\\)'\$/\\1/p" "${CONF}" 2>/dev/null | head -n 1 || true; }   # || true：conf 缺失或 head 早退（SIGPIPE）时输出空串，不中断
@@ -201,14 +262,12 @@ apply_random_pw() {
 }
 
 do_password() {
-  printf '  1) 自己输入  2) 生成随机密码\n'
-  local op
-  while :; do
-    read -rp "选择 [1-2]（回车取消） " op || die "输入中断"
-    [[ -z "${op}" ]] && return 0
-    [[ "${op}" == "1" || "${op}" == "2" ]] && break
-    printf '请输入 1 或 2。\n'
-  done
+  ui_item 1 "自己输入（转发 passwd）"
+  ui_item 2 "生成随机密码（22 位，仅显示一次）"
+  printf '  %s0%s) 返回\n' "${C_R}" "${C_0}"
+  ask_menu "选择" 2
+  local op="${UI_REPLY}"
+  if [[ "${op}" == "0" ]]; then return 0; fi
   if [[ "${op}" == "2" ]]; then
     apply_random_pw
   else
@@ -302,14 +361,13 @@ rewrite_authorized_keys() {
 do_pubkey() {
   local op line raw added i k pick del
   while :; do
-    printf '%s\n' "${C_D}──────── 公钥管理 · conf 已配置 ${#PUBKEYS[@]} 个 ────────${C_0}"
-    printf '  %s1%s) 追加公钥   %s2%s) 删除公钥   %s3%s) 返回\n' "${C_G}" "${C_0}" "${C_G}" "${C_0}" "${C_G}" "${C_0}"
-    while :; do
-      read -rp "选择操作 [1-3] " op || die "输入中断"
-      [[ "${op}" == "1" || "${op}" == "2" || "${op}" == "3" ]] && break
-      printf '请输入 1、2 或 3。\n'
-    done
-    if [[ "${op}" == "3" ]]; then return 0; fi
+    printf '%s公钥管理 · conf 已配置 %s 个%s\n' "${C_D}" "${#PUBKEYS[@]}" "${C_0}"
+    ui_item 1 "追加公钥"
+    ui_item 2 "删除公钥"
+    printf '  %s0%s) 返回\n' "${C_R}" "${C_0}"
+    ask_menu "选择操作" 2
+    op="${UI_REPLY}"
+    if [[ "${op}" == "0" ]]; then return 0; fi
     if [[ "${op}" == "1" ]]; then
       printf '粘贴公钥（每行一个，输入空行结束）：\n'
       raw=""
@@ -331,6 +389,8 @@ do_pubkey() {
         save_pubkeys_to_conf
         rewrite_authorized_keys
         log "已追加 ${added} 个公钥"
+      else
+        log "没有新增公钥（输入为空或全部非法）"
       fi
     else
       if [[ "${#PUBKEYS[@]}" -eq 0 ]]; then
@@ -345,10 +405,10 @@ do_pubkey() {
       done
       pick=""
       while :; do
-        read -rp "删除第几把？[1-${#PUBKEYS[@]}]（回车取消） " pick || die "输入中断"
+        read -rp "删除第几把？[1-${#PUBKEYS[@]}]（回车=取消） " pick || die "输入中断"
         [[ -z "${pick}" ]] && break
-        [[ "${pick}" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#PUBKEYS[@]} )) && break
-        printf '输入超出范围，重填。\n'
+        if [[ "${pick}" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#PUBKEYS[@]} )); then break; fi
+        warn "无效输入：请输入 1-${#PUBKEYS[@]}"
       done
       if [[ -n "${pick:-}" ]]; then
         del="${PUBKEYS[$((pick - 1))]}"
@@ -386,24 +446,20 @@ while :; do
   else
     PK_DESC="${C_Y}0 个 ⚠${C_0}"
   fi
-  printf '%s\n' "${C_D}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_0}"
+  ui_rule
   printf '%s 用户管理 · %s%s\n' "${C_B}" "${C_G}" "${ADMIN_USER}"
-  printf '%s\n' "${C_D}───────────────────────────────────${C_0}"
-  printf '  登录密码    %b\n' "${PW_DESC}"
-  printf '  sudo 免密   %s\n' "${SUDO_DESC}"
-  printf '  公钥        %s\n' "${PK_DESC}"
-  printf '%s\n' "${C_D}───────────────────────────────────${C_0}"
-  printf '  %s1%s) 设置/修改登录密码\n' "${C_G}" "${C_0}"
-  printf '  %s2%s) sudo 免密 开↔关\n' "${C_G}" "${C_0}"
-  printf '  %s3%s) 管理公钥（追加/删除）\n' "${C_G}" "${C_0}"
-  printf '  %s0%s) 退出\n' "${C_R}" "${C_0}"
-  printf '%s\n' "${C_D}───────────────────────────────────${C_0}"
-  OP=""
-  while :; do
-    read -rp "选择操作 [0-3] " OP || die "输入中断"
-    [[ "${OP}" == "0" || "${OP}" == "1" || "${OP}" == "2" || "${OP}" == "3" ]] && break
-    printf '请输入 0、1、2 或 3。\n'
-  done
+  ui_sep
+  ui_kv "登录密码" "${PW_DESC}"
+  ui_kv "sudo 免密" "${SUDO_DESC}"
+  ui_kv "公钥" "${PK_DESC}"
+  ui_sep
+  ui_item 1 "设置/修改登录密码"
+  ui_item 2 "sudo 免密 开↔关"
+  ui_item 3 "管理公钥（追加/删除）"
+  ui_quit
+  ui_sep
+  ask_menu "选择操作" 3 "退出"
+  OP="${UI_REPLY}"
   case "${OP}" in
     0) break ;;
     1) do_password ;;
