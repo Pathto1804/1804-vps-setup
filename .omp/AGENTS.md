@@ -35,7 +35,7 @@ bash tools/sync_check.sh                          # 改公共函数/公共变量
 
 - `README.md`：唯一操作手册（用户视角），改脚本行为时同步"做什么"描述与 conf 键表
 - `docs/tutorial.md`：手动教程，与脚本行为保持等价（脚本改了它也要跟）
-- `CONTEXT.md` 已退役。知识统一维护在 `docs/codewiki/`：`business.md`（边界）、`architecture.md`（机制）、`features.md`（逐脚本行为）、`development.md`（流程与教训）、`terms.md`（术语，措辞以此为准）。改脚本行为时同批更新 `features.md` 与 `README.md`。
+- `docs/codewiki/`：维护者知识库（`business.md` / `architecture.md` / `features.md` / `development.md` / `terms.md`）。规则见下一节「CodeWiki 维护原则」。`CONTEXT.md` 已退役，其术语表迁入 `terms.md`。
 - `tools/sync_check.sh`：公共块一致性自检，在**改公共代码后拦住"只改了一个脚本"的失守**。检查五项：
   1. **25 个公共函数跨脚本一致**（md5 比对函数体）——内联复制机制下，任一脚本被单独修改即报警
   2. **`CONF`/`BK_ROOT` 变量一致**——取值须跨脚本相同；被使用就必须有定义（set -u 下漏定义即崩，2026-09-26 的事故）
@@ -44,6 +44,19 @@ bash tools/sync_check.sh                          # 改公共函数/公共变量
   5. **公共块关键行存在性**（`check_line`）——如 `shopt -s inherit_errexit`：不属于任何函数体，漏加不会被上面四项拦住（2026-09-29 加）
 
   检查范围含 `08-swap.sh`（它不参与函数比对，但变量与文件存在性纳入）。输出 `=== 一致性 OK ===` 才算过。
+
+## CodeWiki 维护原则（先读后改）
+
+`docs/codewiki/` 是维护者知识库，`README.md` 只回答"怎么用"。**动任何脚本或架构决定之前，先读对应篇目**；不动代码也要在交付前确认知识是否过期。
+
+- **读什么**：改行为前读 `features.md` 对应小节；改公共块/conf/路径前读 `architecture.md`；判断"该不该做"前读 `business.md` 的非目标；写新概念前读 `terms.md`。不确定就去 `docs/codewiki/README.md` 的职责表查。
+- **同批更新（硬规则）**：脚本行为、菜单项、前置自检、闸门、conf 键、文件落点任一变化，必须在**同一个提交**内更新 `docs/codewiki/features.md`；用户可见口径同时更新 `README.md`。文档与代码不一致时以代码为准并立即修正文档，不得留待下次。
+- **术语唯一**：新概念或改义只写进 `terms.md`，其他文档直接引用不重复定义。术语与代码行为冲突时，先确认是代码错了还是术语过时。
+- **架构写结论，理由写 ADR**：`architecture.md` 只记录机制与约束结论；任何新的架构取舍先建 `docs/adr/000N-*.md`（含被否方案与触发重评条件），再回填架构结论段。不要用大段论证污染 codewiki。
+- **禁止复制的清单**：conf 键表、包清单、步骤命令的权威位置分别是 `README.md` 与 `01-base.sh`。codewiki 只写规则并链接，不另存一份——否则 `sync_check` 通过而文档仍在骗人。`development.md` 的演进表只记"变了什么、影响面"，不抄代码。
+- **禁止写进 codewiki**：会话过程、临时调试输出、待办与"下一步计划"、未落地的想法（要么进 ADR 被否方案，要么丢掉）、单机环境细节（IP、路径、快照名）。
+- **篇幅纪律**：新增内容先判断归属哪一篇；找不到归属说明它不属于长期知识，不要新建第五六篇。单篇超过约 200 行先考虑拆成结论 + 指向源码，而不是继续堆细节。
+- **验收**：改 codewiki 不需要 `sync_check`；但只要同批改了脚本，双绿 + `sync_check` 照常必跑。文档改完自查相对链接目标存在（`docs/adr/`、`features.md` 等），不留死链。
 
 ## 已知教训（新会话必读）
 

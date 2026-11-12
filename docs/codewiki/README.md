@@ -19,6 +19,8 @@
 5. **不复制易漂移的清单。** conf 键表、包清单的权威位置是 `README.md` 与 `01-base.sh`，这里只链接并说明规则；`tools/sync_check.sh` 会核对包清单。
 6. **修改本目录不需要跑 `sync_check`**，但改了脚本后跑它是硬性要求（见 [development.md](development.md)）。
 
+以上规则在 `.omp/AGENTS.md`「CodeWiki 维护原则」中作为对 AI 代理的硬约束重复声明；两处不一致时以 `.omp/AGENTS.md` 为准，并立即修正本页。
+
 ## 快照
 
 | 项 | 值 |
