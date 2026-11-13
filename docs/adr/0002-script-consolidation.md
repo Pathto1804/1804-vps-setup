@@ -1,6 +1,7 @@
 # 0002 — 脚本合并与步骤号前缀约定
 
-- 状态：已接受（2026-10-06）
+- 状态：已被 [ADR-0003](0003-single-tui-native-state.md) 取代（2026-11-16）
+- 历史状态：已接受（2026-10-06）
 - 关联：[docs/codewiki/terms.md](../codewiki/terms.md)（步骤号（前缀号）词条）、[0001](0001-no-orchestrator.md)（自包含脚本的交付形态）
 
 ## 背景

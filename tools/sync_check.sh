@@ -1,55 +1,47 @@
 #!/usr/bin/env bash
+# 单入口一致性自检（00-tui.sh 之后不再有跨脚本公共块）
+# 检查项：
+#   1. 入口脚本存在且唯一（00-tui.sh），旧步骤脚本不得复活
+#   2. 关键行存在性：shopt -s inherit_errexit（命令替换不继承 errexit，漏加即空值写盘）
+#   3. 包清单一致：00-tui.sh 的 BASE / TOOLS_EXTRA_DEFAULT vs README 与手动教程
+#   4. 项目私有状态文件不得复活：脚本里不得出现 /root/.vps-init.conf
 set -euo pipefail
-FUNCS="log warn die err_trap require_root require_tty require_distro ask_yesno ask_input ask_input_def backup_file bk_prune conf_has conf_read conf_write conf_get conf_update v_any v_yesno v_user v_pubkey v_ssh_port v_ports_list conf_val sshd_port rand_port"
-SCRIPTS="01-base.sh 04-user.sh 05-ufw-ssh.sh 07-fail2ban.sh 09-bbr.sh 12-verify.sh"
+ENTRY="00-tui.sh"
+RETIRED="01-base.sh 04-user.sh 05-ufw-ssh.sh 07-fail2ban.sh 08-swap.sh 09-bbr.sh 12-verify.sh"
 declare -i BAD=0
-for fn in $FUNCS; do
-  declare -A H=()
-  for f in $SCRIPTS; do
-    [[ -f "$f" ]] || continue
-    body=$(sed -n "/^${fn}()/,/\$/p" "$f" | sed -n '1p')     # 单行函数取行
-    body2=$(sed -n "/^${fn}() {/,/^\}/p" "$f")               # 多行函数取块
-    body="${body:-$body2}"
-    [[ -n "$body" ]] || body="$body2"
-    # 用 grep 精确行
-    line=$(grep "^${fn}()" "$f" 2>/dev/null | head -1 || true)
-    [[ -z "$line" ]] && continue
-    if [[ "$line" == *"{"* ]] && [[ "$line" != *"}"* ]]; then
-      body=$(sed -n "/^${fn}() {/,/^\}/p" "$f")
-    else
-      body="$line"
-    fi
-    h=$(printf '%s' "$body" | md5sum | cut -c1-8)
-    H[$h]="${H[$h]:-} $f"
-  done
-  c=0; for _ in "${!H[@]}"; do c=$((c+1)); done
-  if [[ $c -gt 1 ]]; then
-    echo "❌ $fn ($c 种):"
-    for h in "${!H[@]}"; do echo "    ${H[$h]}"; done
-    BAD+=1
-  fi
+
+# ---- 1. 入口存在且唯一，旧脚本不得复活 ----
+[[ -f "${ENTRY}" ]] || { echo "❌ 缺少入口脚本：${ENTRY}"; BAD+=1; }
+for f in ${RETIRED}; do
+  [[ -f "${f}" ]] && { echo "❌ 已退役的步骤脚本仍在：${f}（功能应已并入 ${ENTRY}）"; BAD+=1; }
 done
 
-# ---- 包清单一致性：01-base.sh 的 BASE / TOOLS_EXTRA 默认值 vs README 与手动教程 ----
+# ---- 2. 关键行存在性 ----
+# 命令替换默认不继承 errexit：漏加这一行，$(ask_input ...) 里的 die 只终止子 shell，
+# 空值会被照常写进系统配置（2026-09-29 修 F3 缺陷时实测复现）
+grep -qxF 'shopt -s inherit_errexit' "${ENTRY}" 2>/dev/null || {
+  echo "❌ ${ENTRY} 缺少关键行：shopt -s inherit_errexit"; BAD+=1; }
+
+# ---- 3. 包清单一致性：00-tui.sh 的 BASE / TOOLS_EXTRA_DEFAULT vs README 与手动教程 ----
 norm_list() { tr ' ' '\n' | grep -v '^$' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//'; }
-BASE_LIST="$(sed -n 's/^BASE="\(.*\)"$/\1/p' 01-base.sh | norm_list)"
-EXTRA_LIST="$(sed -n 's/.*v_any "\([^"]*\)").*/\1/p' 01-base.sh | norm_list)"
+BASE_LIST="$(sed -n 's/^BASE="\(.*\)"$/\1/p' "${ENTRY}" | norm_list)"
+EXTRA_LIST="$(sed -n 's/^TOOLS_EXTRA_DEFAULT="\(.*\)"$/\1/p' "${ENTRY}" | norm_list)"
 README_BASE="$(grep -o '`sudo ca-certificates[^`]*`' README.md | head -1 | tr -d '`' | norm_list)"
 README_EXTRA="$(grep -o '默认 `jq [^`]*`' README.md | head -1 | sed 's/默认 //' | tr -d '`' | norm_list)"
 TUT_LIST="$(sed -n '/^apt install -y sudo ca-certificates/,/[^\\]$/p' docs/tutorial.md \
             | tr -d '\\' | sed 's/^apt install -y //' | norm_list)"
 EXPECT_ALL="$(printf '%s %s' "${BASE_LIST}" "${EXTRA_LIST}" | norm_list)"
 
-check_list() {   # check_list <名称> <01-base.sh 侧> <文档侧>
+check_list() {   # check_list <名称> <00-tui.sh 侧> <文档侧>
   [[ "$2" == "$3" ]] && return 0
-  echo "❌ $1 与 01-base.sh 不一致"
-  echo "    01-base.sh: $2"
+  echo "❌ $1 与 ${ENTRY} 不一致"
+  echo "    ${ENTRY}: $2"
   echo "    $1: $3"
   BAD+=1
 }
 
 if [[ -z "${BASE_LIST}" ]]; then
-  echo "❌ 未能从 01-base.sh 提取 BASE 包清单"
+  echo "❌ 未能从 ${ENTRY} 提取 BASE 包清单"
   BAD+=1
 else
   check_list "README 包清单" "${BASE_LIST}" "${README_BASE}"
@@ -57,88 +49,11 @@ else
   check_list "tutorial 包清单" "${EXPECT_ALL}" "${TUT_LIST}"
 fi
 
-# ---- 公共变量一致性：定义必须唯一一致；用到就必须定义 ----
-# 覆盖全部脚本（含 08-swap.sh）：08 自带独立 helper，不参与公共函数比对，
-# 但只要它用了 CONF/BK_ROOT 就必须自己定义（set -u 下未定义即崩）。
-# 背景：变量赋值原先不在自检范围内——06/07/09 曾漏定义 BK_ROOT，
-# 首次运行因 backup_file 对不存在文件提前返回而掩盖，重跑触发备份时才崩。
-ALL_SCRIPTS="${SCRIPTS} 08-swap.sh"
-check_var() {   # check_var <变量名>
-  local var="$1" val="" val_src="" v="" line="" defs=""
-  for f in ${ALL_SCRIPTS}; do
-    [[ -f "$f" ]] || continue
-    defs="$(grep -E "^[[:space:]]*(readonly[[:space:]]+)?${var}=" "$f" || true)"
-    if [[ -n "${defs}" ]]; then
-      while IFS= read -r line; do
-        v="${line#*=}"
-        v="${v%\"}"; v="${v#\"}"          # 去外层双引号
-        if [[ -z "${val}" ]]; then
-          val="${v}"; val_src="${f}"
-        elif [[ "${v}" != "${val}" ]]; then
-          echo "❌ ${var} 取值不一致：${val_src}=${val} vs ${f}=${v}"
-          BAD+=1
-        fi
-      done <<<"${defs}"
-    elif grep -v '^[[:space:]]*#' "$f" | grep -qE "\\\$\{?${var}[^A-Za-z0-9_]"; then
-      echo "❌ ${var} 在 ${f} 中被使用但从未定义（set -u 下会崩）"
-      BAD+=1
-    fi
-  done
-}
-check_var CONF
-check_var BK_ROOT
-check_var BK_KEEP
-
-# ---- 交互原语一致性：只存在于有菜单的脚本（04/05/07），与公共函数分开比对 ----
-# 01/09/12 无菜单，不定义这些函数（放进公共块就是死代码）。
-UI_FUNCS="_disp_w ui_sep ui_rule ui_kv ui_item ui_quit ask_menu ui_abort"
-UI_SCRIPTS="04-user.sh 05-ufw-ssh.sh 07-fail2ban.sh"
-for fn in ${UI_FUNCS}; do
-  declare -A UH=()
-  for f in ${UI_SCRIPTS}; do
-    [[ -f "$f" ]] || continue
-    line=$(grep "^${fn}()" "$f" 2>/dev/null | head -1 || true)
-    if [[ -z "$line" ]]; then
-      echo "❌ ${f} 缺少交互原语 ${fn}()"
-      BAD+=1
-      continue
-    fi
-    if [[ "$line" == *"{"* ]] && [[ "$line" != *"}"* ]]; then
-      body=$(sed -n "/^${fn}() {/,/^\}/p" "$f")
-    else
-      body="$line"
-    fi
-    h=$(printf '%s' "$body" | md5sum | cut -c1-8)
-    UH[$h]="${UH[$h]:-} $f"
-  done
-  c=0; for _ in "${!UH[@]}"; do c=$((c+1)); done
-  if [[ $c -gt 1 ]]; then
-    echo "❌ 交互原语 ${fn} 被改散（${c} 种）："
-    for h in "${!UH[@]}"; do echo "    ${UH[$h]}"; done
-    BAD+=1
-  fi
-done
-# trap 在函数体外，不进函数体 md5 比对，单独查行
-for f in ${UI_SCRIPTS}; do
-  [[ -f "$f" ]] || continue
-  grep -qxF "trap 'ui_abort' INT" "$f" || { echo "❌ ${f} 缺少关键行：trap 'ui_abort' INT"; BAD+=1; }
-done
-
-# ---- 关键行存在性：属于公共块、但不进函数体 md5 比对的行（漏加不会被上面拦住）----
-check_line() {   # check_line <字面量行>：SCRIPTS 中每个脚本都必须整行包含该行
-  local pat="$1" f
-  for f in ${SCRIPTS}; do
-    [[ -f "$f" ]] || continue
-    grep -qxF "${pat}" "$f" || { echo "❌ ${f} 缺少关键行：${pat}"; BAD+=1; }
-  done
-}
-# 命令替换默认不继承 errexit：漏加这一行，$(ask_input ...) 里的 die 只终止子 shell，
-# 空值会被照常写进 conf（2026-09-29 修的 F3 缺陷，成因见 .omp/AGENTS.md 已知教训）
-check_line 'shopt -s inherit_errexit'
-
-# ---- 脚本清单完整性：预期脚本文件必须存在（防误删/改名）----
-for f in ${ALL_SCRIPTS}; do
-  [[ -f "${f}" ]] || { echo "❌ 缺少脚本文件：${f}"; BAD+=1; }
-done
+# ---- 4. 项目私有状态文件不得复活 ----
+# 状态一律读系统原生来源；任何脚本引用该路径都说明私有运行态被重新引入
+if grep -n '/root/\.vps-init\.conf' "${ENTRY}" >/dev/null 2>&1; then
+  echo "❌ ${ENTRY} 引用了已废弃的项目私有状态文件 /root/.vps-init.conf"
+  BAD+=1
+fi
 
 [[ $BAD -eq 0 ]] && echo "=== 一致性 OK ===" || echo "=== ${BAD} 处仍有差异 ==="

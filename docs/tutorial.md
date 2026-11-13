@@ -79,7 +79,7 @@ cat /var/run/reboot-required 2>/dev/null     # 文件不存在则无需重启
 reboot
 ```
 
-重启完重新连上就行。想确认的话：`uname -r` 显示的版本应该变了。脚本版（`01-base.sh`）把这两步连着做：升级 → 装工具 → **最后才问重启**，一次重启收尾，中途不用来回重连。
+重启完重新连上就行。想确认的话：`uname -r` 显示的版本应该变了。脚本版（`00-tui.sh` 菜单 `0` 第 2 步）把这两步连着做：升级 → 装工具 → **最后才问重启**，一次重启收尾，中途不用来回重连。
 
 ### 基础工具
 
@@ -130,7 +130,7 @@ chown -R <用户名>:<用户名> /home/<用户名>/.ssh
 
 ### UFW 防火墙
 
-> 脚本版（`05-ufw-ssh.sh`）把本节做成菜单：首次运行只显示状态与建议，初始化（菜单 `1`）与加固（菜单 `2`）都由你选择执行；之后重跑进维护菜单做日常维护（`4` 放行 / `5` 删规则 / `6` 启用禁用 / `7` 默认策略 / `8` 业务端口清单）。这一节保留手动等价做法，便于理解每步在干什么。
+> 脚本版在 `00-tui.sh` 的菜单 `3`：进入只显示状态，查看规则、放行、删规则、启停、改默认策略都要再选一次动作。标准初始化（菜单 `0` 第 5 步）会自动先配防火墙再加固。这一节保留手动等价做法，便于理解每步在干什么。
 
 先想好新的 SSH 端口（别用 22 和 2222；不想挑就用 `shuf -i 10000-65535 -n 1` 生成一个随机数），然后：
 
@@ -149,7 +149,7 @@ ufw status verbose                           # 检查点：当前端口和新端
 
 ### SSH 加固
 
-> 脚本版（`05-ufw-ssh.sh`）在防火墙初始化之后接着走本节流程（双闸门），之后重跑进维护菜单（`2` 重新应用 / `3` 状态总览 / `9` 改端口与管理员 / `10` 从备份恢复），入口不再散落命令。
+> 脚本版在 `00-tui.sh` 菜单 `3`：`6` 用当前生效端口重新加固，`7` 改端口并加固（两者都过双闸门），`8` 看生效值与加固文件，`9` 从备份恢复。标准初始化第 5 步会自动走一遍。
 
 ```bash
 ls /etc/ssh/sshd_config.d/                   # 看有没有 50-cloud-init.conf 之类的覆盖文件
@@ -193,11 +193,11 @@ systemctl reload ssh
 ufw delete allow <当前端口>/tcp              # 旧端口确认无用后删
 ```
 
-万一锁在门外：云控制台/VNC 进去，把备份文件恢复回去，再 `systemctl reload ssh` 就回来了。所以第 0 步的 Snapshot 一定要拍。（脚本版锁死时同样的恢复动作可从 `05-ufw-ssh.sh` 菜单 10 做：挑一份 `/root/vps-init-backups/<时间戳>/01-hardening.conf`，它会先 `sshd -t` 校验、必要时先放行端口再问你是否重启 sshd。）
+万一锁在门外：云控制台/VNC 进去，把备份文件恢复回去，再 `systemctl reload ssh` 就回来了。所以第 0 步的 Snapshot 一定要拍。（脚本版锁死时同样的恢复动作可从 `00-tui.sh` 菜单 `3` → `9` 做：挑一份 `/root/vps-init-backups/<时间戳>/01-hardening.conf`，它会先 `sshd -t` 校验、必要时先放行端口再问你是否重启 sshd。）
 
 ## 7. fail2ban
 
-> 脚本版（`07-fail2ban.sh`）首次运行只提示尚未配置，安装与写配置由菜单 `1` 触发；之后重跑进维护菜单（应用配置 / 查看状态 / 改参数 / 封禁解封 IP）。这一节保留手动等价做法，便于理解每步在干什么。
+> 脚本版在 `00-tui.sh` 菜单 `4`：安装与写配置由 `1` 触发，`2` 看详情，`3` 改参数，`4` 封禁/解封。这一节保留手动等价做法，便于理解每步在干什么。
 
 ```bash
 nano /etc/fail2ban/jail.local
@@ -250,7 +250,7 @@ sysctl -p /etc/sysctl.d/99-bbr.conf
 sysctl net.ipv4.tcp_congestion_control       # 检查点：输出 bbr
 ```
 
-想进一步调网络参数的话，仓库里 `09-bbr.sh` 有一份完整参数集，但那份是为特定场景调的，不懂每项含义别照抄。
+想进一步调网络参数的话，`00-tui.sh` 菜单 `6` 有一份完整参数集（写 `/etc/sysctl.d/99-bbr.conf`），但那份是为特定场景调的，不懂每项含义别照抄——所以脚本默认不应用，要你明确选择才写。
 
 ## 10. 自动安全更新
 
@@ -262,7 +262,7 @@ printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgr
 systemctl enable --now apt-daily.timer apt-daily-upgrade.timer
 ```
 
-**装包不等于启用**：`unattended-upgrades` 装完时 `20auto-upgrades` 两行默认是 `"0"`（关闭），Ubuntu 无人值守镜像可能预置为 `"1"`、Debian 需自己开。之后安全补丁系统自己装（升级哪些源由 `50unattended-upgrades` 决定，默认含 security），你不用管。脚本流程里 01-base.sh 已自动写入并启用，这一步只是复核。
+**装包不等于启用**：`unattended-upgrades` 装完时 `20auto-upgrades` 两行默认是 `"0"`（关闭），Ubuntu 无人值守镜像可能预置为 `"1"`、Debian 需自己开。之后安全补丁系统自己装（升级哪些源由 `50unattended-upgrades` 决定，默认含 security），你不用管。脚本流程里 `00-tui.sh` 菜单 `0` 第 2 步已自动写入并启用，这一步只是复核。
 
 ## 11. Docker（提示）
 
@@ -301,7 +301,7 @@ bash <(curl -fsSL https://linuxmirrors.cn/docker.sh) --source mirrors.aliyun.com
 
 ## 12. 终检
 
-把下面命令挨个跑一遍，输出符合注释就是通过（脚本 `12-verify.sh` 自动做的就是这些）：
+把下面命令挨个跑一遍，输出符合注释就是通过（脚本 `00-tui.sh` 菜单 `7` 自动做的就是这些，结果写入 `/root/vps-init-report.md`）：
 
 ```bash
 sshd -T | grep -Ei 'port|passwordauthentication|permitrootlogin'
@@ -315,9 +315,9 @@ timedatectl | grep -E 'NTP|synchronized'
 df -h /
 ```
 
-**云安全组要去云平台网页上看**：旧端口关了没、新端口开了没——这是机器上的命令查不到的，只能自己上控制台看。
+**云安全组要去云平台网页上看**：旧端口关了没、新端口开了没——这是机器上的命令查不到的，只能自己上控制台看。同理，脚本**不保存旧端口**，终检只把 `ufw status numbered` 的规则全列出来，哪条是历史旧端口由你自己核对。
 
 ## 13. 归档
 
-- 找个地方记下：SSH 端口、用户名、放行了哪些端口（脚本版会自动生成 `/root/vps-init-report.md`，手动版自己记，别丢了端口号）
+- 找个地方记下：SSH 端口、用户名、放行了哪些端口（脚本版会在 `/root/vps-init-report.md` 里记下当前状态与完整 ufw 规则，手动版自己记，别丢了端口号）
 - 云平台创建最终 Snapshot

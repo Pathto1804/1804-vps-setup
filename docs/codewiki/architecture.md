@@ -3,120 +3,118 @@
 ## 仓库布局
 
 ```
-/                     7 个步骤脚本 + 两个入口文档 + 仓库配置
-docs/adr/             决策记录（0001 无编排器、0002 合并与步骤号）
+/                     唯一入口脚本 00-tui.sh + README.md + 仓库配置
+docs/adr/             决策记录（0001/0002 已被 0003 取代，0003 为现行决策）
 docs/codewiki/        本目录：长期维护知识
 docs/tutorial.md      手动等价教程（脚本改了它要跟）
-tools/sync_check.sh   公共块一致性自检（唯一自动化检查）
+tools/sync_check.sh   单入口一致性自检（唯一自动化检查）
 ```
 
-根目录只允许放步骤脚本 `NN-xxx.sh`、`README.md` 和仓库配置；其余一律进 `docs/`、`tools/`、`.omp/`。
+根目录只允许放入口脚本 `00-tui.sh`、`README.md` 和仓库配置；其余一律进 `docs/`、`tools/`、`.omp/`。
 
-## 核心机制：自包含 + 内联公共块
+## 核心机制：单文件 + 原生状态
 
-每个脚本是**单文件可独立执行**的程序：不 `source` 仓库内任何文件，所需函数全部内联在脚本顶部。内联的是**公共函数的一个子集**——各脚本只带自己用到的那些，但同一函数在出现的每个脚本里必须逐字相同（`tools/sync_check.sh` 用 md5 比对 25 个函数）。
-
-```
-公共函数池（各脚本按需内联）
-  ├─ 常量      SCRIPT_NAME / CONF / BK_ROOT
-  ├─ 颜色与输出 log warn die err_trap
-  ├─ 环境前置   require_root require_tty require_distro
-  ├─ 交互       ask_yesno ask_input ask_input_def
-  ├─ 备份       backup_file
-  ├─ conf 读写  conf_has conf_read conf_write conf_get conf_update
-  └─ 校验器     v_any v_yesno v_user v_pubkey v_ssh_port v_ports_list
-                conf_val sshd_port rand_port
-```
-
-典型子集差异：`12-verify.sh` 只读，只有 `log/warn/die/err_trap/require_root/require_distro/conf_read`；`09-bbr.sh` 不含交互与 conf 函数；`07-fail2ban.sh` 额外带 `v_posint` / `v_ip` / `jail_val`（仅本脚本使用，不参与跨脚本比对）。
-
-推导链（来自 ADR-0001）：raw 单文件交付 → 脚本必须自包含 → 公共逻辑只能内联 → 复制多份 → 必须用工具保证一致。**不要提议改回 `common.sh` + `source`**，那会让 raw 单文件执行直接失效。
-
-`08-swap.sh` 是唯一例外：自带 helper（`ask_option` / `ask_value` / `confirm`，结果写入 `ANSWER`）、`set -uo pipefail`（不开 `-e`）、自有 `cleanup` trap。它不参与函数比对，但用了 `CONF` / `BK_ROOT` 就必须自己定义。
-
-## 跨脚本契约
-
-脚本之间**没有调用关系**，靠三样东西对齐：
-
-1. **共享 conf**（`/root/.vps-init.conf`，600，root 属主）
-2. **共享备份目录**（`/root/vps-init-backups/<时间戳>/`）——只保留最近 `BK_KEEP`=20 份，超出由 `bk_prune` 删最旧；内容与最新一份相同则复用该目录并刷新时间戳。裁剪只匹配 `YYYYmmdd-HHMMSS` 目录名，不触碰其他内容。
-3. **一致的内联函数**（同名函数必须到处一样）
+`00-tui.sh` 是**唯一的可执行脚本**，单文件 raw 拉取即可运行：不 `source` 仓库内任何文件，所需函数全部内联。启动只做三件事——环境前置检查（root / TTY / Debian 系）、状态探测、绘制主菜单；**不装软件、不初始化系统、不写文件**。
 
 ```mermaid
-graph LR
-  S01[01-base] -->|TOOLS_EXTRA| C[(conf)]
-  S04[04-user] -->|ADMIN_USER / SSH_PUBKEY_N / SUDO_NOPASSWD| C
-  S05[05-ufw-ssh] -->|SSH_PORT / OLD_SSH_PORT / ALLOWED_PORTS| C
-  S07[07-fail2ban] -->|F2B_BANTIME / FINDTIME / MAXRETRY| C
-  C --> S05
-  C --> S07
-  C --> S12[12-verify]
-  S05 -->|sshd -T 实际端口| S07
-  S08[08-swap] -.->|不用公共块| C2[[/etc/fstab + 99-swappiness.conf]]
-  S09[09-bbr] --> SYS[[99-bbr.conf]]
-  S05 -->|01-hardening.conf| SSH[(sshd drop-in)]
-  S07 -->|jail.local| F2B[(fail2ban)]
+graph TD
+  M[主菜单<br/>实时状态] -->|0| SI[标准初始化<br/>9 步固定顺序]
+  M -->|1| B[系统更新与基础工具]
+  M -->|2| U[用户、密码、sudo、密钥]
+  M -->|3| F[UFW 与 SSH]
+  M -->|4| J[fail2ban]
+  M -->|5| S[Swap 子 shell]
+  M -->|6| R[BBR]
+  M -->|7| V[终检与报告]
+  SI --> NAT[(系统原生状态)]
+  B --> NAT
+  U --> NAT
+  F --> NAT
+  J --> NAT
+  S --> NAT
+  R --> NAT
+  V --> NAT
 ```
 
-conf 键的权威表格在 `README.md`「参数只输一次」一节，这里不复制（复制必漂移）。
+## 状态来源：原生系统，不落盘
+
+**本项目没有自己的状态文件。** 旧版用来保存参数的 `/root/.vps-init.conf` 已从代码中彻底移除；新入口不读、不写、不迁移、也不自动删除旧 VPS 上可能残留的那份文件。
+
+| 关心的东西 | 权威来源 |
+|---|---|
+| SSH 有效配置 | `sshd -T`（端口、认证策略、AllowUsers、MaxAuthTries） |
+| SSH 实际监听 | `ss -tln`（`sshd -T` 只读配置，不保证端口已绑定） |
+| ufw 状态与规则 | `ufw status numbered` / `ufw status verbose`；未启用时 `ufw show added` |
+| 管理员用户 | sshd 有效 `AllowUsers` 中唯一且存在的用户；否则 `getent passwd` 列候选 |
+| 公钥 | `~/.ssh/authorized_keys`（逐行读取与改写） |
+| 密码状态 | `passwd -S <用户>` |
+| sudo 免密 | `LC_ALL=C sudo -l -U <用户>` 的有效权限，不靠文件存在性推断 |
+| fail2ban | `systemctl is-active fail2ban` + `fail2ban-client status sshd` + `/etc/fail2ban/jail.local` |
+| Swap | `/proc/swaps`、`/etc/fstab`、`sysctl vm.swappiness` |
+| BBR | `sysctl net.ipv4.tcp_congestion_control`、`net.core.default_qdisc` |
+| 自动更新 | `/etc/apt/apt.conf.d/20auto-upgrades` + `apt-daily*.timer` |
+| 已装包 | `dpkg-query -W -f='${Status}'` |
+| 待升级事务 | `apt-get -s full-upgrade` 的 `Inst`/`Remv` 行 |
+
+用户输入的偏好（可选工具清单、jail 参数、目标端口）**只存在于本次 Bash 进程**，不跨进程保存。服务所需的原生配置文件仍照旧创建与修改——它们是服务的持久状态，不是本项目的缓存。
 
 ## 运行时数据落点
 
 | 路径 | 写入者 | 删除后 |
 |---|---|---|
-| `/root/.vps-init.conf` | 01/04/05/07 | 重新询问，不影响系统配置 |
-| `/root/vps-init-backups/<时间戳>/` | 01/04/05/07/08/09（`08` 写 `fstab[.N]`，其余写各自被改文件） | 失去人工回滚副本 |
-| `/root/vps-init-report.md` | 12 | 重跑生成 |
-| `/etc/ssh/sshd_config.d/01-hardening.conf` | 05 | sshd 回到未加固状态 |
-| `/etc/fail2ban/jail.local` | 07 | 回到 fail2ban 默认（盯 22，等于失效） |
-| `/etc/apt/apt.conf.d/20auto-upgrades` | 01 | 自动安全更新关闭，12 判红 |
-| `/etc/sysctl.d/99-bbr.conf` | 09 | BBR 配置丢失（内核默认值） |
-| `/etc/sysctl.d/99-swappiness.conf` | 08 | swappiness 回默认 |
+| `/root/vps-init-backups/<时间戳>/` | 所有写配置的动作（`backup_file`） | 失去人工回滚副本 |
+| `/root/vps-init-report.md` | 菜单 7（终检） | 重跑生成 |
+| `/etc/ssh/sshd_config.d/01-hardening.conf` | 菜单 3 / 标准初始化第 5 步 | sshd 回到未加固状态 |
+| `/etc/fail2ban/jail.local` | 菜单 4 / 标准初始化第 6 步 | 回到 fail2ban 默认（盯 22，等于失效） |
+| `/etc/apt/apt.conf.d/20auto-upgrades` | 菜单 1 / 标准初始化第 2 步 | 自动安全更新关闭，终检判红 |
+| `/etc/sysctl.d/99-bbr.conf` | 菜单 6（需明确选择） | BBR 配置丢失（内核默认值） |
+| `/etc/sysctl.d/99-swappiness.conf`、`/etc/fstab` | 菜单 5（Swap） | swap 持久化丢失 |
+| `/etc/sudoers.d/<用户>` | 菜单 2 | sudo 免密关闭 |
+| `~/.ssh/authorized_keys` | 菜单 2 | 公钥丢失 |
+
+备份目录只保留最近 `BK_KEEP`=20 份，超出由 `bk_prune` 删最旧；内容与最新一份相同则复用该目录并刷新时间戳。裁剪只匹配 `YYYYmmdd-HHMMSS` 目录名。
 
 ## 执行顺序与前置自检
 
-顺序由人保证（无编排器），脚本只拦住"已知会出事"的顺序错误：
+顺序由「标准初始化」固定，菜单里的单项动作只拦住"已知会出事"的状态：
 
-| 脚本 | 前置断言 | 违反时 |
+| 位置 | 前置断言 | 违反时 |
 |---|---|---|
-| 01 | root + TTY + Debian/Ubuntu | 直接退出 |
-| 04 | root + TTY + 发行版 | 直接退出 |
-| 05 | ufw 已安装、sshd 存在；`Include` drop-in 已启用 | 退出 |
-| 05 `do_apply` | `ADMIN_USER` 真实存在（先于一切系统检查） | 退出，不写 AllowUsers |
-| 05 `do_apply` | ufw 已启用 + 新端口已放行 + 迁移期旧端口仍放行 | 退出，不动 sshd |
-| 05 `do_init` | `ufw show added` 里能看到新端口才 `ufw --force enable` | 退出，不启用 |
-| 07 | `sshd -T` 可读且端口与 conf 一致 | **拒绝写 jail.local**（fail closed） |
-| 07 | 退出前 jail 就绪 + 端口一致 | 退出码 1 |
-| 12 | 无（只读）；conf 缺失则降级为纯系统检查 | 黄灯提示 |
+| 进程启动 | root + TTY + Debian/Ubuntu | `die`，退出码 1 |
+| 菜单 3 加固 | sshd_config 已启用 `Include` drop-in；`ADMIN_USER` 真实存在 | 拒绝写 AllowUsers |
+| 菜单 3 加固 | ufw active + 目标端口已放行 + 迁移期旧端口仍放行 | 拒绝改 sshd |
+| 菜单 3 / 标准初始化第 5 步 | 启用 ufw 前必须能在规则里看到目标端口 | 拒绝 enable |
+| 菜单 4 应用 | `sshd -T` 可读且 jail 端口与之一致 | **拒绝写 jail.local**（fail closed） |
+| 标准初始化第 3 步 | 时区为 `Asia/Shanghai` 且 NTP active | 中止剩余步骤 |
+| 标准初始化第 4 步 | authorized_keys 非空 + 用户确认密钥登录可用 | 中止剩余步骤 |
+| 标准初始化第 5 步 | 两道闸门 | 中止，不继续 fail2ban |
+| 标准初始化第 6 步 | jail 就绪且端口一致 | 中止剩余步骤 |
 
 ## 失败与恢复语义
 
-- **公共脚本**：`set -euo pipefail` + `shopt -s inherit_errexit` + `ERR` trap → `die "行 N: 命令"`，退出码 1。
-- **`08-swap.sh`**：`set -uo pipefail`（不开 `-e`），段落内自行判错；`trap cleanup EXIT` 清理半成品 swap 文件与 fstab 备份提示。
-- **默认不自动回滚**。唯一的两处刻意例外：
-  1. `05-ufw-ssh.sh` 菜单 10：从备份恢复前先 `sshd -t`，失败则退回恢复前版本。
-  2. `08-swap.sh`：fstab 修改后 `findmnt --verify` 失败且修改前基线正常时，从备份自动恢复。
-- **备份时机**：写任何系统配置文件之前 `backup_file`，路径打印给用户。
-- **锁死预案**：云控制台/VNC → 还原备份 → `systemctl reload ssh`；最终防线是步骤 0 的 Snapshot。
+- **动作级**：菜单动作统一经 `act` 调用（临时关掉 `-e` 与 ERR trap），动作内每个危险步骤显式 `|| die_action` / `if !` 判错，失败只中止该动作并打印原因，TUI 继续可用。
+- **进程级**：启动前置检查与输入中断（EOF/Ctrl-D）用 `die`，退出码 1。`set -euo pipefail` + `shopt -s inherit_errexit` + ERR trap 在动作之外保持生效。
+- **`08` 的交互风格**：Swap 段保留 `set -uo pipefail`（不开 `-e`）、自有 helper、`trap cleanup EXIT`，由 `run_swap_menu()` 在子 shell 中运行，选项与 trap 不外泄。
+- **默认不自动回滚**。两处刻意例外：
+  1. 菜单 3 → 从备份恢复 `01-hardening.conf`：先 `sshd -t`，失败则退回恢复前版本。
+  2. 菜单 5：fstab 修改后 `findmnt --verify` 失败且修改前基线正常时，从备份自动恢复。
+- **锁死预案**：云控制台/VNC → 还原备份 → `systemctl reload ssh`；最终防线是上机前的 Snapshot。
 
-## 交互形态：菜单式脚本
+## 交互形态：单入口 TUI
 
-`04` / `05` / `07` 采用同一形态：首次运行自动完成本步骤初始化 → 进入常驻菜单 → 重跑即维护。
-
-- 菜单顶部是实时状态行，从系统读取而非读缓存。
-- 一次只做一件事，`0` 退出。
-- **菜单只呈现动作，不放宽闸门与前置自检**：走菜单重应用 SSH 加固，同样要过双闸门。
-
-`08-swap.sh` 形态相同但实现独立（`ask_option` + 常量式选项文案）。
+- 主菜单顶部是实时状态，每次绘制前重新读取。
+- 主菜单：`0`–`7` 选功能、`q` 退出；空输入原地重问（**不会**映射成 `0`）；非法输入原地重问。
+- 子菜单：`0` 或空回车返回主菜单。
+- **进入任何编号都只是打开状态页/子菜单，不自动执行写操作**，必须再显式选动作。
+- 清屏只在 stdout 是 TTY 且 `TERM` 可用、非 `dumb` 时发生；动作输出、错误诊断、闸门提示在用户确认前不清屏。
 
 ## 自动化检查的边界
 
-`tools/sync_check.sh` 检查五类，且**只检查这五类**：
+`tools/sync_check.sh` 检查四类，且**只检查这四类**：
 
-1. 公共函数跨脚本 md5 一致（比对 `01/04/05/07/09/12`）
-2. `CONF` / `BK_ROOT` 定义一致，且用到就必须定义
-3. 包清单：`01-base.sh` 的 `BASE` / `TOOLS_EXTRA` 与 README、`docs/tutorial.md` 逐项相同
-4. 预期脚本文件存在（防误删/改名）
-5. 关键行存在性：`shopt -s inherit_errexit`
+1. 入口脚本 `00-tui.sh` 存在，且已退役的步骤脚本没有复活
+2. 关键行存在性：`shopt -s inherit_errexit`
+3. 包清单：`00-tui.sh` 的 `BASE` / `TOOLS_EXTRA_DEFAULT` 与 README、`docs/tutorial.md` 逐项相同
+4. 脚本里不得引用 `/root/.vps-init.conf`（防止私有状态被重新引入）
 
 检查不到的：语法、ShellCheck、行为正确性、文档与脚本语义是否一致、锁死链路是否被破坏。这些靠人工（见 [development.md](development.md)）。
