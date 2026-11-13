@@ -361,6 +361,7 @@ fw_rule_line() {   # fw_rule_line <编号>：输出该编号规则的文本（�
 # ============ 状态探测：用户 / sudo / 公钥 ============
 user_home() { getent passwd "$1" | cut -d: -f6; }
 user_gid()  { id -g "$1"; }
+user_exists() { id -u "$1" >/dev/null 2>&1; }   # 不打印 id 的报错；账号不存在返回 1
 
 human_users() {   # 可登录普通用户（UID 1000..59999 且 shell 可用）
   local u uid shell
@@ -390,10 +391,13 @@ admin_from_allowusers() {   # 有效 AllowUsers 中「唯一且存在」的用�
 }
 
 resolve_admin_user() {
-  # 优先：本进程已确定且账号存在；其次：有效 AllowUsers 的唯一用户；最后：交互选择
+  # 无参数：只解析「已存在」的账号；空回车=暂不指定，返回 1
+  # --allow-new：允许留一个尚不存在的合法用户名（仅标准初始化第 4 步用，随后会创建）
+  local allow_new=0
+  [[ "${1-}" == "--allow-new" ]] && allow_new=1
   local u
   local -a cands=()
-  if [[ -n "${ADMIN_USER}" ]] && id "${ADMIN_USER}" >/dev/null 2>&1; then
+  if [[ -n "${ADMIN_USER}" ]] && user_exists "${ADMIN_USER}"; then
     return 0
   fi
   u="$(admin_from_allowusers)"
@@ -414,17 +418,46 @@ resolve_admin_user() {
     printf '  （无）\n'
   fi
   while :; do
-    read -rp "管理员用户名（输入上面的编号，或直接输入用户名）: " u || die "输入中断"
-    if [[ "${u}" =~ ^[0-9]+$ ]] && (( u >= 1 && u <= ${#cands[@]} )); then
-      ADMIN_USER="${cands[u - 1]}"
-      return 0
+    read -rp "管理员用户名（输入上面的编号，或直接输入用户名；回车=暂不指定）: " u || die "输入中断"
+    if [[ -z "${u}" ]]; then
+      warn "未指定管理员账号：本页面的写操作都会被拒绝"
+      return 1
+    fi
+    if [[ "${u}" =~ ^[0-9]+$ ]]; then
+      if (( ${#cands[@]} > 0 )) && (( u >= 1 && u <= ${#cands[@]} )); then
+        ADMIN_USER="${cands[u - 1]}"
+        return 0
+      fi
+      warn "无效编号：请输入 1-${#cands[@]}，或用户名"
+      continue
     fi
     if v_user "${u}" >/dev/null 2>&1; then
-      ADMIN_USER="${u}"
-      return 0
+      if user_exists "${u}"; then
+        ADMIN_USER="${u}"
+        return 0
+      fi
+      if (( allow_new )); then
+        ADMIN_USER="${u}"
+        log "账号 ${u} 尚不存在：稍后按提示创建"
+        return 0
+      fi
+      warn "用户 ${u} 不存在：请在本菜单选 1 创建，或重新输入已有用户名"
+      continue
     fi
     warn "无效输入：请输入 1-${#cands[@]} 的编号，或合法用户名（小写字母开头）"
   done
+}
+
+need_admin() {   # 写操作前置：管理员账号必须已确定且存在
+  if [[ -z "${ADMIN_USER}" ]]; then
+    die_action "未确定管理员账号：请先在本菜单选 1 指定用户"
+    return 1
+  fi
+  if ! user_exists "${ADMIN_USER}"; then
+    die_action "用户 ${ADMIN_USER} 不存在：请先在本菜单选 1 创建（或改用已有账号）"
+    return 1
+  fi
+  return 0
 }
 
 pw_state() {   # P / L / NP / 未知
@@ -448,10 +481,12 @@ sudo_state() {   # yes / no / unknown —— 用有效权限查询，不用文�
   fi
 }
 
-ak_path() {   # 管理员用户的 authorized_keys 路径；解析失败输出空
+ak_path() {   # 管理员用户的 authorized_keys 路径；账号不存在或无主目录时输出空
   local h
+  [[ -n "${ADMIN_USER}" ]] || { printf ''; return 0; }
+  user_exists "${ADMIN_USER}" || { printf ''; return 0; }
   h="$(user_home "${ADMIN_USER}")" || true
-  [[ -n "${h}" ]] || { printf ''; return 0; }
+  [[ -n "${h}" && -d "${h}" ]] || { printf ''; return 0; }
   printf '%s/.ssh/authorized_keys' "${h}"
 }
 
@@ -465,8 +500,9 @@ ak_count() {   # authorized_keys 中的有效公钥行数
 
 ak_write_lines() {   # 用 AK_LINES 原子替换 authorized_keys（保留属主与 700/600 权限）
   local u="${ADMIN_USER}" h gid ak tmp
+  user_exists "${u}" || { die_action "用户 ${u} 不存在，无法写 authorized_keys"; return 1; }
   h="$(user_home "${u}")" || true
-  [[ -n "${h}" ]] || { die_action "无法解析 ${u} 的主目录"; return 1; }
+  [[ -n "${h}" && -d "${h}" ]] || { die_action "无法解析 ${u} 的主目录"; return 1; }
   gid="$(user_gid "${u}")"
   ak="${h}/.ssh/authorized_keys"
   if ! { mkdir -p "${h}/.ssh" && chmod 700 "${h}/.ssh"; }; then
@@ -753,7 +789,8 @@ base_menu() {
 
 # ============ 模块 2：用户、密码、sudo 和密钥 ============
 user_do_password() {
-  local op
+  local op out rc=0
+  need_admin || return 1
   ui_item 1 "自己输入（转发 passwd）"
   ui_item 2 "生成随机密码（22 位，仅显示一次）"
   ui_quit
@@ -763,15 +800,32 @@ user_do_password() {
   if [[ "${op}" == "2" ]]; then
     local pw
     pw="$(gen_random_pw)"
-    printf '%s生成的密码（仅显示这一次，请立即保存到密码管理器）：%s%s%s\n' "${C_Y}" "${C_B}" "${pw}" "${C_0}"
-    if ! printf '%s:%s\n' "${ADMIN_USER}" "${pw}" | chpasswd; then
-      die_action "设置密码失败（chpasswd 返回非零）"
-      return 0
+    if (( ${#pw} < 20 )); then
+      die_action "生成随机密码失败（长度 ${#pw}），未改动账户"
+      return 1
     fi
-    printf '%s密码已设置\n' "${C_G}"
+    printf '%s生成的密码（仅显示这一次，请立即保存到密码管理器）：%s%s%s\n' "${C_Y}" "${C_B}" "${pw}" "${C_0}"
+    # 捕获 chpasswd 的输出：失败原因在它的 stderr（常见：PAM 拒收弱密码、rootfs 只读、用户不存在）
+    out="$(printf '%s:%s\n' "${ADMIN_USER}" "${pw}" | chpasswd 2>&1)" || rc=$?
     unset pw
+    if (( rc != 0 )); then
+      die_action "设置密码失败（chpasswd 退出码 ${rc}）：${out:-无输出}"
+      return 1
+    fi
+    if [[ "$(pw_state "${ADMIN_USER}")" != "P" ]]; then
+      die_action "chpasswd 返回 0，但 passwd -S 仍显示未设置密码；请手动执行 passwd ${ADMIN_USER}"
+      return 1
+    fi
+    printf '%s密码已设置（passwd -S 已确认）%s\n' "${C_G}" "${C_0}"
   else
-    passwd "${ADMIN_USER}"
+    if ! passwd "${ADMIN_USER}"; then
+      die_action "passwd 未完成（退出码非零）：密码未改动或强度不足被拒，见上方输出"
+      return 1
+    fi
+    if [[ "$(pw_state "${ADMIN_USER}")" != "P" ]]; then
+      warn "passwd 已返回，但 passwd -S 仍显示未设置密码，请再执行一次 passwd ${ADMIN_USER}"
+      return 1
+    fi
   fi
   return 0
 }
@@ -788,11 +842,13 @@ gen_random_pw() {
 }
 
 user_do_sudo() {
-  local u="${ADMIN_USER}" f st new
+  local u f st new
+  need_admin || return 1
+  u="${ADMIN_USER}"
   f="/etc/sudoers.d/${u}"
   st="$(sudo_state "${u}")"
   case "${st}" in
-    unknown) warn "无法查询 ${u} 的 sudo 有效权限（sudo -l 失败），拒绝切换"; return 0 ;;
+    unknown) warn "无法查询 ${u} 的 sudo 有效权限（sudo -l 失败），拒绝切换"; return 1 ;;
     yes) new="no" ;;
     *)   new="yes" ;;
   esac
@@ -801,22 +857,27 @@ user_do_sudo() {
   if [[ "${new}" == "yes" ]]; then
     backup_file "${f}" >/dev/null || true
     if ! printf '%s ALL=(ALL) NOPASSWD: ALL\n' "${u}" > "${f}"; then
-      die_action "写入 ${f} 失败"
-      return 0
+      die_action "写入 ${f} 失败（检查 /etc/sudoers.d 是否可写、磁盘是否只读）"
+      return 1
     fi
     if ! { chmod 0440 "${f}" && chown root:root "${f}" && visudo -c >/dev/null 2>&1; }; then
       rm -f "${f}"
-      warn "sudoers 校验失败（权限或语法），已删除 ${f}；请勿破坏 sudo"
-      return 0
+      die_action "sudoers 校验失败（权限或语法），已删除 ${f}；请勿破坏 sudo"
+      return 1
     fi
-    log "已开启免密：${f}"
+    st="$(sudo_state "${u}")"
+    if [[ "${st}" != "yes" ]]; then
+      die_action "已写入 ${f} 但 sudo -l 仍显示 NOPASSWD 未生效（${st}）：确认 /etc/sudoers 里 includedir 未被注释"
+      return 1
+    fi
+    log "已开启免密并通过 sudo -l 确认：${f}"
   else
     if [[ -f "${f}" ]]; then
       backup_file "${f}" >/dev/null || true
       rm -f "${f}"
       if ! visudo -c >/dev/null 2>&1; then
-        warn "删除后 sudoers 校验失败，请立即检查 /etc/sudoers.d/"
-        return 0
+        die_action "删除 ${f} 后 sudoers 校验失败，请立即检查 /etc/sudoers.d/"
+        return 1
       fi
       log "已删除本项目管理的 ${f}"
     else
@@ -837,6 +898,7 @@ user_do_sudo() {
 user_do_key_add() {
   local line added=0 ak
   local -a newl=()
+  need_admin || return 1
   printf '粘贴公钥（每行一个，输入空行结束）：\n'
   while IFS= read -r line; do
     [[ -z "${line}" ]] && break
@@ -851,7 +913,7 @@ user_do_key_add() {
     return 0
   fi
   ak="$(ak_path)"
-  [[ -n "${ak}" ]] || { warn "无法解析 ${ADMIN_USER} 的主目录"; return 0; }
+  [[ -n "${ak}" ]] || { die_action "无法解析 ${ADMIN_USER} 的主目录"; return 1; }
   AK_LINES=()
   if [[ -f "${ak}" ]]; then
     mapfile -t AK_LINES < "${ak}"
@@ -864,16 +926,19 @@ user_do_key_add() {
   if [[ -f "${ak}" ]]; then
     backup_file "${ak}" >/dev/null || true
   fi
-  ak_write_lines || return 0
-  log "已追加 ${added} 个公钥到 ${ak}"
+  ak_write_lines || return 1
+  local now
+  now="$(ak_count)"
+  log "已追加 ${added} 个公钥到 ${ak}（当前共 ${now} 把）"
   return 0
 }
 
 user_do_key_del() {
   local ak pick del i n=0
   local -a raw=() idx=()
+  need_admin || return 1
   ak="$(ak_path)"
-  [[ -n "${ak}" ]] || { warn "无法解析 ${ADMIN_USER} 的主目录"; return 0; }
+  [[ -n "${ak}" ]] || { die_action "无法解析 ${ADMIN_USER} 的主目录"; return 1; }
   if [[ ! -f "${ak}" ]]; then
     log "尚无 ${ak}"
     return 0
@@ -905,8 +970,8 @@ user_do_key_del() {
     AK_LINES+=("${raw[i]}")
   done
   backup_file "${ak}" >/dev/null || true
-  ak_write_lines || return 0
-  log "已删除 1 行，其余行与权限保持不变"
+  ak_write_lines || return 1
+  log "已删除 1 行，其余行与权限保持不变（当前 $(ak_count) 把）"
   return 0
 }
 
@@ -922,20 +987,35 @@ user_do_switch() {
     printf '  （无）\n'
   fi
   while :; do
-    read -rp "目标用户名（编号或用户名）: " u || die "输入中断"
-    if [[ "${u}" =~ ^[0-9]+$ ]] && (( u >= 1 && u <= ${#cands[@]} )); then
-      u="${cands[u - 1]}"
-      break
+    read -rp "目标用户名（编号或用户名；回车=取消） " u || die "输入中断"
+    [[ -z "${u}" ]] && return 0
+    if [[ "${u}" =~ ^[0-9]+$ ]]; then
+      if (( ${#cands[@]} > 0 )) && (( u >= 1 && u <= ${#cands[@]} )); then
+        u="${cands[u - 1]}"
+        break
+      fi
+      warn "无效编号：请输入 1-${#cands[@]}，或用户名"
+      continue
     fi
     if v_user "${u}" >/dev/null 2>&1; then break; fi
     warn "无效输入：请输入 1-${#cands[@]} 的编号，或合法用户名"
   done
-  if id "${u}" >/dev/null 2>&1; then
+  if user_exists "${u}"; then
     log "用户 ${u} 已存在，切换为管理目标"
   else
     if ! ask_yesno "用户 ${u} 不存在，创建并加入 sudo 组？" y; then return 0; fi
-    adduser --gecos "" "${u}" || { die_action "创建用户 ${u} 失败"; return 0; }
-    usermod -aG sudo "${u}" || { die_action "把 ${u} 加入 sudo 组失败"; return 0; }
+    if ! adduser --gecos "" "${u}"; then
+      die_action "创建用户 ${u} 失败（见上方 adduser 输出）"
+      return 1
+    fi
+    if ! user_exists "${u}"; then
+      die_action "adduser 返回成功但 ${u} 仍不存在，未切换管理目标"
+      return 1
+    fi
+    if ! usermod -aG sudo "${u}"; then
+      die_action "用户 ${u} 已创建，但加入 sudo 组失败；请手动 usermod -aG sudo ${u}"
+      return 1
+    fi
     log "已创建 ${u} 并加入 sudo 组"
   fi
   ADMIN_USER="${u}"
@@ -964,25 +1044,41 @@ user_do_show_keys() {
 
 user_menu() {
   local pw sudo_st keys
-  resolve_admin_user
+  resolve_admin_user || true
   while :; do
-    pw="$(pw_state "${ADMIN_USER}")"
-    sudo_st="$(sudo_state "${ADMIN_USER}")"
-    keys="$(ak_count)"
+    if [[ -n "${ADMIN_USER}" ]] && user_exists "${ADMIN_USER}"; then
+      pw="$(pw_state "${ADMIN_USER}")"
+      sudo_st="$(sudo_state "${ADMIN_USER}")"
+      keys="$(ak_count)"
+    else
+      pw=""; sudo_st=""; keys=""
+    fi
     scr_clear
     ui_rule
-    printf '%s 用户、密码、sudo 与密钥 · %s%s\n' "${C_B}" "${C_G}" "${ADMIN_USER}"
+    if [[ -n "${ADMIN_USER}" ]] && user_exists "${ADMIN_USER}"; then
+      printf '%s 用户、密码、sudo 与密钥 · %s%s\n' "${C_B}" "${C_G}" "${ADMIN_USER}"
+    elif [[ -n "${ADMIN_USER}" ]]; then
+      printf '%s 用户、密码、sudo 与密钥 · %s%s（不存在）%s\n' "${C_B}" "${C_Y}" "${ADMIN_USER}" "${C_0}"
+    else
+      printf '%s 用户、密码、sudo 与密钥 · %s未指定%s\n' "${C_B}" "${C_Y}" "${C_0}"
+    fi
     ui_sep
-    if [[ "${pw}" == "P" ]]; then ui_kv "登录密码" "$(ui_yes '已设置 ✓')"
-    elif [[ "${pw}" == "L" || "${pw}" == "NP" ]]; then ui_kv "登录密码" "$(ui_no '未设置 ⚠')"
-    else ui_kv "登录密码" "${pw}"; fi
-    case "${sudo_st}" in
-      yes)     ui_kv "sudo 免密" "$(ui_yes '开（NOPASSWD 生效）')" ;;
-      no)      ui_kv "sudo 免密" "关（需密码）" ;;
-      *)       ui_kv "sudo 免密" "$(ui_no '未知（sudo -l 查询失败）')" ;;
-    esac
-    if [[ "${keys}" -gt 0 ]]; then ui_kv "公钥" "${keys} 把"
-    else ui_kv "公钥" "$(ui_no '0 把 ⚠')"; fi
+    if [[ -z "${ADMIN_USER}" ]] || ! user_exists "${ADMIN_USER}"; then
+      ui_kv "登录密码" "$(ui_no '—（先选 1 指定用户）')"
+      ui_kv "sudo 免密" "$(ui_no '—（先选 1 指定用户）')"
+      ui_kv "公钥" "$(ui_no '—（先选 1 指定用户）')"
+    else
+      if [[ "${pw}" == "P" ]]; then ui_kv "登录密码" "$(ui_yes '已设置 ✓')"
+      elif [[ "${pw}" == "L" || "${pw}" == "NP" ]]; then ui_kv "登录密码" "$(ui_no '未设置 ⚠')"
+      else ui_kv "登录密码" "${pw}"; fi
+      case "${sudo_st}" in
+        yes)     ui_kv "sudo 免密" "$(ui_yes '开（NOPASSWD 生效）')" ;;
+        no)      ui_kv "sudo 免密" "关（需密码）" ;;
+        *)       ui_kv "sudo 免密" "$(ui_no '未知（sudo -l 查询失败）')" ;;
+      esac
+      if [[ "${keys}" -gt 0 ]]; then ui_kv "公钥" "${keys} 把"
+      else ui_kv "公钥" "$(ui_no '0 把 ⚠')"; fi
+    fi
     ui_sep
     ui_item 1 "切换 / 新建管理员用户"
     ui_item 2 "设置或修改登录密码"
@@ -996,11 +1092,11 @@ user_menu() {
     case "${UI_REPLY}" in
       0) return 0 ;;
       1) act user_do_switch ;;
-      2) act user_do_password ;;
-      3) act user_do_sudo ;;
-      4) act user_do_key_add ;;
-      5) act user_do_key_del ;;
-      6) act user_do_show_keys ;;
+      2) need_admin && act user_do_password ;;
+      3) need_admin && act user_do_sudo ;;
+      4) need_admin && act user_do_key_add ;;
+      5) need_admin && act user_do_key_del ;;
+      6) need_admin && act user_do_show_keys ;;
     esac
     page_wait "按回车返回用户菜单…"
   done
@@ -1049,7 +1145,8 @@ ssh_harden() {   # ssh_harden <目标端口>：写 drop-in + 双闸门；成功 
   [[ -f "${SSHD_CFG}" ]] || { die_action "未找到 ${SSHD_CFG}"; return 1; }
   grep -q '^Include' "${SSHD_CFG}" || \
     { die_action "需先在 sshd_config 启用 Include drop-in（本流程依赖 drop-in 覆盖）"; return 1; }
-  if ! id "${ADMIN_USER}" >/dev/null 2>&1; then
+  need_admin || return 1
+  if ! getent passwd "${ADMIN_USER}" >/dev/null 2>&1; then
     die_action "系统用户 ${ADMIN_USER} 不存在。AllowUsers 写它会让所有账号（含当前会话）下次登录被拒"
     return 1
   fi
@@ -1497,7 +1594,7 @@ fw_do_restore() {
 
 fw_menu() {
   local eff e_root e_pwd e_users e_tries hard_users sshp
-  resolve_admin_user
+  resolve_admin_user || true
   while :; do
     fw_refresh
     sshp="$(sshd_port)"
@@ -1508,12 +1605,12 @@ fw_menu() {
     e_tries="$(eff_val "${eff}" maxauthtries)"
     hard_users=""
     [[ -f "${HARD}" ]] && hard_users="$(sed -n 's/^AllowUsers[[:space:]]\+//p' "${HARD}" | tr -d '\r')"
-    if [[ -n "${hard_users}" && "${hard_users}" != "${ADMIN_USER}" ]]; then
-      e_users="${e_users} ${C_Y}（本进程管理员为 ${ADMIN_USER}，应用加固后改为它）${C_0}"
+    if [[ -n "${hard_users}" && "${hard_users}" != "${ADMIN_USER:-}" ]]; then
+      e_users="${e_users} ${C_Y}（本进程管理员为 ${ADMIN_USER:-未指定}，应用加固后改为它）${C_0}"
     fi
     scr_clear
     ui_rule
-    printf '%s UFW 与 SSH · %s%s\n' "${C_B}" "${C_G}" "${ADMIN_USER}"
+    printf '%s UFW 与 SSH · %s%s\n' "${C_B}" "${C_G}" "${ADMIN_USER:-未指定}"
     ui_sep
     case "$(fw_state)" in
       active) ui_kv "防火墙" "$(ui_yes 'active ✓')" ;;
@@ -2690,27 +2787,48 @@ do_standard_init() {
 
   # ---- 步骤 4：管理员账号、密码、sudo、公钥 ----
   step_banner 4 "管理员账号与密钥"
-  resolve_admin_user
-  if id "${ADMIN_USER}" >/dev/null 2>&1; then
+  resolve_admin_user --allow-new || { flow_abort "未指定管理员账号，未继续"; return 1; }
+  if user_exists "${ADMIN_USER}"; then
     log "用户 ${ADMIN_USER} 已存在"
-    usermod -aG sudo "${ADMIN_USER}"
+    if ! usermod -aG sudo "${ADMIN_USER}"; then
+      flow_abort "把 ${ADMIN_USER} 加入 sudo 组失败，未继续"
+      return 1
+    fi
   else
     log "创建用户 ${ADMIN_USER}"
-    adduser --gecos "" "${ADMIN_USER}"
-    usermod -aG sudo "${ADMIN_USER}"
-    log "已加入 sudo 组"
+    if ! adduser --gecos "" "${ADMIN_USER}"; then
+      flow_abort "创建用户 ${ADMIN_USER} 失败（见上方 adduser 输出），未继续"
+      return 1
+    fi
+    if ! user_exists "${ADMIN_USER}"; then
+      flow_abort "adduser 返回成功但 ${ADMIN_USER} 仍不存在，未继续"
+      return 1
+    fi
+    if ! usermod -aG sudo "${ADMIN_USER}"; then
+      flow_abort "用户 ${ADMIN_USER} 已创建，但加入 sudo 组失败，未继续"
+      return 1
+    fi
+    log "已创建 ${ADMIN_USER} 并加入 sudo 组"
   fi
   if [[ "$(pw_state "${ADMIN_USER}")" == "P" ]]; then
     log "登录密码已设置（已满足）"
   else
     warn "用户 ${ADMIN_USER} 尚无可用密码"
     if ask_yesno "现在设置登录密码？" y; then
-      user_do_password
+      if ! user_do_password; then
+        flow_abort "登录密码未设置成功，未继续"
+        return 1
+      fi
+    else
+      warn "跳过密码：仅密钥登录仍可用，但 sudo 需要密码或免密"
     fi
   fi
   log "sudo 免密当前有效状态：$(sudo_state "${ADMIN_USER}")"
   if ask_yesno "开启 sudo 免密（NOPASSWD）？" n; then
-    user_do_sudo
+    if ! user_do_sudo; then
+      flow_abort "sudo 免密配置未成功，未继续"
+      return 1
+    fi
   fi
   if [[ "$(ak_count)" -eq 0 ]]; then
     warn "authorized_keys 中没有公钥——禁用密码后你将无法登录"
@@ -2718,7 +2836,10 @@ do_standard_init() {
       flow_abort "没有公钥，继续会锁死登录"
       return 1
     fi
-    user_do_key_add
+    if ! user_do_key_add; then
+      flow_abort "写入公钥失败，未继续"
+      return 1
+    fi
     if [[ "$(ak_count)" -eq 0 ]]; then
       flow_abort "仍未写入公钥，继续会锁死登录"
       return 1
@@ -2810,7 +2931,7 @@ do_standard_init() {
 
 # ============ 主菜单 ============
 draw_main_menu() {
-  local sshp keys
+  local sshp keys admin_ok=0
   sshp="$(sshd_port)"
   keys="$(ak_count)"
   fw_refresh
@@ -2824,9 +2945,12 @@ draw_main_menu() {
     未安装) ui_kv "UFW" "$(ui_no '未安装')" ;;
     *)      ui_kv "UFW" "$(ui_no "$(fw_state) ⚠")" ;;
   esac
-  if [[ -n "${ADMIN_USER}" ]]; then ui_kv "管理员" "${ADMIN_USER}"; else ui_kv "管理员" "${C_D}未确定（进入用户菜单时选择）${C_0}"; fi
-  if [[ -n "${ADMIN_USER}" && "${keys}" -gt 0 ]]; then ui_kv "公钥" "${keys} 把"
-  elif [[ -n "${ADMIN_USER}" ]]; then ui_kv "公钥" "$(ui_no '0 把 ⚠')"
+  if [[ -n "${ADMIN_USER}" ]] && user_exists "${ADMIN_USER}"; then admin_ok=1; fi
+  if (( admin_ok )); then ui_kv "管理员" "${ADMIN_USER}"
+  elif [[ -n "${ADMIN_USER}" ]]; then ui_kv "管理员" "$(ui_no "${ADMIN_USER}（不存在）⚠")"
+  else ui_kv "管理员" "${C_D}未确定（进入用户菜单时选择）${C_0}"; fi
+  if (( admin_ok )) && [[ "${keys}" -gt 0 ]]; then ui_kv "公钥" "${keys} 把"
+  elif (( admin_ok )); then ui_kv "公钥" "$(ui_no '0 把 ⚠')"
   else ui_kv "公钥" "${C_D}—${C_0}"; fi
   if f2b_installed; then
     if fail2ban-client status sshd >/dev/null 2>&1; then ui_kv "fail2ban" "$(ui_yes 'sshd jail 运行中 ✓')"

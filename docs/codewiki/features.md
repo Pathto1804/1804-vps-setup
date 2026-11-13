@@ -33,7 +33,7 @@
 | 1 | 显示 `/etc/os-release`、CPU、内存、磁盘、当前 SSH 端口 | 必须确认已建初始 Snapshot、知晓安全组端口、备好密钥；拒绝即中止，无任何系统变更 |
 | 2 | `apt-get update`；`apt-get -s full-upgrade` 有事务才 `full-upgrade -y`；补齐 `BASE`；选装可选工具；`ua_enable`；`maybe_reboot` | 需要重启时询问，选重启即结束本次流程 |
 | 3 | 显示时区与 NTP | 时区不是 `Asia/Shanghai` 或 NTP 未 active → 打印手动命令并暂停；复检仍不达标即中止，**不改这两项设置** |
-| 4 | 解析管理员 → 创建/加入 sudo 组 → 密码（缺才问）→ sudo 免密（默认不）→ 公钥（0 把时必须补） | 必须确认新终端密钥登录 + `sudo -v` 通过，否则中止 |
+| 4 | 解析管理员（`--allow-new`）→ `adduser` + 复查存在性 + 加入 sudo 组（任一步失败即中止）→ 密码（缺才问，写后复查 `passwd -S`）→ sudo 免密（默认不，写后复查 `sudo -l`）→ 公钥（0 把时必须补） | 必须确认新终端密钥登录 + `sudo -v` 通过，否则中止 |
 | 5 | 读 sshd 实际端口；22/2222 时给随机建议并要求确认/输入目标端口，已是自定义端口则沿用 → `fw_prepare_for_ssh` → `ssh_harden` | 双闸门；闸门一/二任一拒绝即中止且不进入第 6 步；闸门二拒绝时旧端口规则保留 |
 | 6 | jail 未就绪或端口不一致才 `f2b_apply` | 读不到 sshd 端口或 jail 未就绪即中止 |
 | 7 | swap 未启用时询问是否进 Swap 流程（默认跳过） | 跳过则继续 |
@@ -60,12 +60,16 @@
 
 ## `2` 用户、密码、sudo 和密钥
 
-管理员解析顺序：本进程已确定且账号存在 → sshd 有效 `AllowUsers` 中唯一且存在的用户 → 列出 `getent passwd` 里可登录普通用户（UID 1000–59999 且 shell 非 nologin/false），可选现有账号或输入新用户名（`v_user` 校验）。**用户名只存在于本次进程**。
+管理员解析顺序：本进程已确定且账号存在 → sshd 有效 `AllowUsers` 中唯一且存在的用户 → 列出 `getent passwd` 里可登录普通用户（UID 1000–59999 且 shell 非 nologin/false）。
+
+**解析结果必须是已存在账号**（`user_exists` = `id -u`）。默认模式下输入不存在的用户名会被拒绝并重问；只有 `do_standard_init` 第 4 步用 `--allow-new` 放行一个尚未创建的用户名，随后立即 `adduser` 并复查存在性，任一步失败即中止流程。空回车 = 暂不指定，`user_menu` 显示"未指定"且除 `1` 以外的动作全部被 `need_admin` 拒绝。**用户名只存在于本次进程**。
+
+> 历史缺陷：早期版本用 `v_user` 格式校验就接受用户名，导致"幽灵账号"——此后 `chpasswd`、`sudo -l`、`authorized_keys` 全部对着不存在的账号执行，`chpasswd` 报 PAM `Authentication token manipulation error`。
 
 | 项 | 行为 | 写什么 |
 |---|---|---|
-| `1` 切换 / 新建管理员 | 列候选 → 选择；不存在则 `adduser` + `usermod -aG sudo` | 系统账户 |
-| `2` 设置或修改密码 | 转发 `passwd`，或生成 22 位随机密码（只显示一次，`unset` 后不留存） | 系统密码 |
+| `1` 切换 / 新建管理员 | 列候选 → 选择；不存在则 `adduser` + 复查 `user_exists` + `usermod -aG sudo`，任一步失败则 `die_action` 且不切换管理目标 | 系统账户 |
+| `2` 设置或修改密码 | 转发 `passwd`，或生成 22 位随机密码（只显示一次，`unset` 后不留存）；两条路径写完后都复查 `passwd -S` 为 `P`，失败时原文回显 `chpasswd`/`passwd` 的 stderr | 系统密码 |
 | `3` sudo 免密 开/关 | 用 `sudo -l -U` 的有效权限判断当前状态；`unknown` 直接拒绝切换。开启写 `/etc/sudoers.d/<用户>` 并 `visudo -c`，失败即删文件。关闭**只删本项目管理的那个文件**，删后重查；若仍 NOPASSWD 则明确报告"其他规则仍放行" | `/etc/sudoers.d/<用户>` |
 | `4` 追加公钥 | 逐行粘贴，空行结束；逐行过 `v_pubkey`，非法行跳过；读现有文件后追加 | `authorized_keys` |
 | `5` 删除公钥 | 按行号删除用户选中的**原始行**，其余行原样保留 | `authorized_keys` |
