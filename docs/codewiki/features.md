@@ -38,11 +38,11 @@
 | 4 | 解析非 root 管理员（`--allow-new`）→ `adduser` + 复查存在性 + 加入 sudo 组 → 密码 / sudo 免密 → 公钥 | 必须在新终端强制公钥登录并通过 `sudo -v`；有效 `AllowUsers` 仅允许 root 时停止，不写 SSH 加固配置 |
 | 5 | 读 sshd 实际端口；22/2222 时给随机建议并要求确认/输入目标端口，已是自定义端口则沿用 → `fw_prepare_for_ssh` → `ssh_harden` | 双闸门；闸门一/二任一拒绝即中止且不进入第 6 步；闸门二拒绝时旧端口规则保留 |
 | 6 | jail 未就绪或端口不一致才 `f2b_apply` | 读不到 sshd 端口或 jail 未就绪即中止 |
-| 7 | swap 未启用时询问是否进 Swap 流程（默认跳过） | 跳过则继续 |
-| 8 | 显示拥塞控制与 qdisc，说明参数为作者特调 | 明确选择才写 `99-bbr.conf`；拒绝则继续，不改 sysctl |
+| 7 | swap 未启用时按内存定档（≤2048MB → 2048，否则 4096）自动创建 `/swapfile` 并设 `vm.swappiness=10`（`run_swap_auto`） | 一次确认；btrfs/ZFS、OpenVZ/LXC、`/swapfile` 已存在但 fstab 无条目、空间不足等情况说明原因后跳过并继续 |
+| 8 | 显示拥塞控制与 qdisc，打印外部来源与风险说明（不写任何 sysctl） | 答"已自行应用"则重读一次并记录，未变成 bbr 只 warn；答否则继续 |
 | 9 | 复核自动更新 → Docker 仅提示（必须选"不关闭防火墙"）→ 终检 → 提示创建最终 Snapshot | — |
 
-`fw_prepare_for_ssh` 的细节：ufw 未启用时写默认策略（deny incoming / allow outgoing）；迁移期临时放行当前端口；放行目标端口；**仅首次初始化（ufw 未启用）时**询问额外业务端口；启用前自检目标端口在规则里，否则拒绝 `enable`。
+`fw_prepare_for_ssh` 的细节：ufw 未启用时写默认策略（deny incoming / allow outgoing）；迁移期临时放行当前端口；放行目标端口；**仅首次初始化（ufw 未启用）时**先问是否放行 80/443（默认否），再问额外端口列表（可留空=不放行，仅 `tcp`）。业务端口统一经 `fw_allow_business_port`：**每次放行前重新取一次规则快照**（`fw_refresh`），已存在就跳过——跨步骤沿用旧快照会重复执行 `ufw allow` 并谎报"已放行"。启用前自检目标端口在规则里，否则拒绝 `enable`。
 
 ---
 
@@ -134,7 +134,9 @@
 
 ## `7` Swap
 
-独立风格模块：`set -uo pipefail`（无 `-e`）、自有 helper（`swap_ask_option` / `swap_ask_value` / `swap_confirm`，结果写入 `SWAP_ANSWER`）、`trap swap_cleanup EXIT`；在子 shell 中运行，选项与 trap 不外泄。只管理 swap **文件**，不碰分区；不支持 btrfs/ZFS 上的 swap 文件；容器内无法启用 swap。
+独立风格模块：`set -uo pipefail`（无 `-e`）、自有 helper（`swap_ask_option` / `swap_ask_value`，结果写入 `SWAP_ANSWER`）、`trap swap_cleanup EXIT`；在子 shell 中运行，选项与 trap 不外泄。y/n 一律走公共 `ask_yesno`（swap 段不再有独立实现）。只管理 swap **文件**，不碰分区；不支持 btrfs/ZFS 上的 swap 文件；容器内无法启用 swap。
+
+`run_swap_auto <大小MB>` 是标准初始化第 7 步用的无交互路径：同样的子 shell 契约 + `swap_auto_create`，跳过 btrfs/ZFS、容器（OpenVZ/LXC/docker/podman/nspawn）、空间不足、`/swapfile` 已存在但 fstab 无条目这几种情况（返回 0，由调用方继续后续步骤）；`/swapfile` 已存在且 fstab 有条目时只做 `swapon` 复活，不重建。两条成功路径都会调用 `swap_auto_swappiness` 把 `vm.swappiness` 设为 10。
 
 | 项 | 行为 |
 |---|---|
@@ -149,7 +151,7 @@
 
 ## `8` BBR
 
-显示当前 `tcp_congestion_control` / `default_qdisc` / 配置文件状态；`1` 写入并应用 `/etc/sysctl.d/99-bbr.conf`（内容一致则跳过写入；`sysctl -p` 部分键失败只警告）；`2` 只读查看。**参数是作者本机特调，必须用户明确选择才应用**；`tcp_congestion_control` 不是 `bbr` 时报错返回 1。
+**只读**：显示当前 `tcp_congestion_control` / `default_qdisc`，以及 `/etc/sysctl.d/99-bbr.conf` 是否存在（该文件由用户按外部说明自行写入，本程序不创建）。`1` 打印外部来源与风险说明（`bbr_external_notes`，站点常量 `BBR_SITE`）；`2` 只读查看当前 sysctl 值与文件内容。不内置参数集、不写 sysctl、无"应用"动作；终检仍把 `tcp_congestion_control` 不是 `bbr` 标黄。
 
 ---
 

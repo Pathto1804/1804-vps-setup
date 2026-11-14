@@ -49,6 +49,7 @@ bash tools/sync_check.sh                               # 必须输出「一致�
 | 坑 | 规则 |
 |---|---|
 | 命令替换不继承 errexit，`Ctrl-D` 写出空值行 | 保留 `shopt -s inherit_errexit`；`sync_check` 拦截漏加 |
+| `act` 关闭了 errexit，动作内 `x="$(ask_input …)"` 的 `die` 只终止子 shell，赋值失败后流程带着空值继续（实测：打印"输入中断"却照常放行端口） | 动作内凡 `ask_input*` 赋值一律接 `|| { …; return }`；`inherit_errexit` 只在 `-e` 生效时兜底 |
 | `set -o pipefail` 下 `sed \| head -n 1` 返回 141，报告都没生成 | 同类 helper 一律 `\|\| true`，或先取全量再匹配 |
 | `sshd -T` 读端口的 SIGPIPE 竞态误判 | 先取全量输出再 `grep`，不用 `grep -q` 直连上游 |
 | `return "$(f)"` 在 f 无输出时崩成 rc=2 | 分两步：先打印，再 `return 1` |
@@ -74,6 +75,7 @@ bash tools/sync_check.sh                               # 必须输出「一致�
 | 2026-11-12 | 交互层统一（`ask_menu`/`ui_*`）；`05`/`07` 首次运行不再自动写 | 交互契约写入 `terms.md` |
 | 2026-11-12 | 备份目录保留策略（`BK_KEEP`=20、内容相同复用、`bk_prune`） | 目标机不再产生散落文件 |
 | 2026-11-12 | `CONTEXT.md` 退役，知识迁入 `docs/codewiki/` | 单一知识入口 |
+| 2026-11-15 | y/n 提示统一为 `[y/n]（回车=是/否）`（删掉 `swap_confirm`，输入大小写都认）；提示后缀统一为四种口径；首次启用 ufw 改问 80/443 + 额外端口；标准初始化第 7 步改自动创建 swap；BBR 段改只读并移除内置参数集 | 交互显示与输入行为收敛到 `ask_yesno`；脚本不再写 `/etc/sysctl.d/99-bbr.conf` |
 | 2026-11-16 | 七个步骤脚本合并为单入口 `00-tui.sh`；删除私有 conf，状态改读原生来源；新增主菜单 `0` 标准初始化；`sync_check` 收缩为入口/关键行/包清单/私有状态四项 | ADR-0001、ADR-0002 被 ADR-0003 取代；失去历史旧端口自动推断 |
 
 ## 文档职责

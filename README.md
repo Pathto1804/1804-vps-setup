@@ -23,9 +23,9 @@
 
    国内拉不动就把 URL 前面加 `https://ghproxy.net/`（详见[国内拉不动 GitHub 怎么办](#国内拉不动-github-怎么办)）。
 
-跑起来之后只剩两件事要你决定：**要不要继续**（每个闸门回答 y/n），和**去云平台改安全组**。其余都是按回车。
+跑起来之后只剩两件事要你决定：**要不要继续**（每个闸门用 `y` / `n` 回答，大小写都认，直接回车走提示里写明的默认值），和**去云平台改安全组**。其余都是按回车。
 
-第一次用？照 `0` 的提示一路走下去，它会在正式初始化前询问是否手动换源，然后依次做：系统更新 → 时区/NTP 检查 → 建管理员 → 防火墙 → SSH 加固 → fail2ban → Swap → BBR → 终检。任何一步拒绝或检查失败，都会停止后续步骤。
+第一次用？照 `0` 的提示一路走下去，它会在正式初始化前询问是否手动换源，然后依次做：系统更新 → 时区/NTP 检查 → 建管理员 → 防火墙 → SSH 加固 → fail2ban → Swap → BBR → 终检。任何安全检查失败或闸门拒绝，都会停止后续步骤；只有 Swap 创建失败只告警并继续。
 
 > **免责声明**：本项目是**个人自用**的 VPS 基础配置脚本集，**不具有通用性**。脚本里的参数和取舍都基于作者本人的需求，由 AI 协助生成，没有经过广泛验证。作者不对任何内容作担保。动手之前，请**自己把脚本读一遍**，尤其是涉及防火墙和 SSH 的那部分。据此操作的风险由使用者自负。
 
@@ -169,7 +169,7 @@ https://gh.ddlc.top/
 
 ## 标准初始化（菜单 `0`）
 
-这是把整套流程按顺序走一遍的引导。顺序固定，每一步先读系统状态，**只修改未达标项**；任何安全检查失败或你回答 `n`，都会立刻中止剩余步骤，不会跳过闸门。
+这是把整套流程按顺序走一遍的引导。顺序固定，每一步先读系统状态，**只修改未达标项**；任何安全检查失败或你回答 `n`，都会立刻中止剩余步骤，不会跳过闸门（例外：第 7 步 Swap 创建失败只告警并继续）。
 
 | 步骤 | 做什么 | 停点 |
 |---|---|---|
@@ -177,10 +177,10 @@ https://gh.ddlc.top/
 | 2 | `apt update` → 有事务才 `full-upgrade` → 补齐必要包 → 选装可选工具 → 启用自动安全更新 | 需要重启时询问，选重启即结束本次流程 |
 | 3 | 检查当前时区与 NTP | 任一 `timedatectl` 有效时区均可；时区无效或 NTP 未 active 时停止，时区可从菜单 `3` 设置，NTP 仍由用户处理 |
 | 4 | 创建/选择非 root 管理员、密码、sudo 免密、authorized_keys | 新终端必须用公钥认证登录并通过 `sudo -v`；root-only `AllowUsers` 时先手动放行新用户并验证 |
-| 5 | 先配 UFW（放行目标端口 + 迁移期保留旧端口），再 SSH 加固 | 双闸门；闸门二拒绝时旧端口规则保留 |
+| 5 | 先配 UFW（放行目标端口 + 迁移期保留旧端口），再 SSH 加固 | 首次启用防火墙时先问要不要放行 80/443，再问还要放行哪些端口（可留空）；双闸门，闸门二拒绝时旧端口规则保留 |
 | 6 | fail2ban（jail 端口必须等于 sshd 实际端口） | 服务未就绪即停止 |
-| 7 | Swap 状态；未启用时询问是否进入创建流程 | 默认跳过 |
-| 8 | BBR 当前状态 + 参数说明 | 只有明确选择才写入 sysctl |
+| 7 | 未启用 swap 时按内存定档（≤2G 内存 → 2G，否则 4G）自动创建 `/swapfile` 并设 `vm.swappiness=10` | 一次确认；btrfs/ZFS、容器等无法创建的情况只说明原因并继续 |
+| 8 | BBR 当前状态 + 外部来源说明 | 只读，不写任何 sysctl；自行按外部说明应用后可回车复查 |
 | 9 | 复核自动更新、Docker 提示、终检并生成报告 | 最后提示去云平台创建最终 Snapshot |
 
 第 2 步的包清单：必要项 `sudo ca-certificates curl wget gnupg ufw fail2ban unattended-upgrades vim nano unzip htop needrestart ncdu mtr-tiny bind9-dnsutils`；可选工具默认 `jq tmux lsof rsync zip`，回车取默认，输入 `none` 不装，也可以自己列。
@@ -193,7 +193,9 @@ https://gh.ddlc.top/
 
 关于第 3 步：菜单 `3` 可把时区改为 `timedatectl list-timezones` 提供的任一时区，并备份 `/etc/localtime` 后复查。标准初始化接受任一有效当前时区，但仍要求 NTP active；它不会自动修改 NTP。
 
-关于第 8 步：仓库里的 BBR/TCP 参数是作者按自己的 VPS（线路、内存、用途）**特调**的，不一定适合你的机器。所以它默认不应用，你明确选"是"才写 `/etc/sysctl.d/99-bbr.conf`。想要匹配自己机器的参数，可以去 <https://omnitt.com> 拿——但从外部站点拉脚本执行之前，请**自己检查脚本内容的安全性**。
+关于第 7 步：swap 没启用时不再让你进退子菜单，直接按上面的档位创建并设 `swappiness=10`，只确认一次。btrfs/ZFS 上的 swap 文件、容器（OpenVZ/LXC）里创建、`/swapfile` 已有同名文件但 fstab 没条目、空间不足——这些情况脚本说明原因后跳过并继续后面的步骤。要自己挑大小、换路径或删除 swap，仍走菜单 `7`。
+
+关于第 8 步：脚本**不再内置也不再写入任何 TCP 调优参数集**，只显示当前拥塞控制与队列规则，并指向 <https://omnitt.com> 让你自己取参数。本项目不提供、不维护该站点的脚本，也未完成安全审计；从外部站点执行 root 代码前请自己检查脚本内容。需要匹配自己机器的参数就去那边拿，应用完回到这一步回车即可复查。
 
 ## 各功能菜单
 
@@ -267,13 +269,15 @@ root 当前是仅密码、仅密钥（例如 `PermitRootLogin prohibit-password`
 
 ### `7` Swap
 
-交互式管理 swap **文件**：查看现状 / 创建（写进 fstab 做持久化）/ 调整 swappiness / 删除。不碰 swap 分区，不支持 btrfs/ZFS 上的 swap 文件，容器里无法启用 swap（脚本会检测并解释）。
+交互式管理 swap **文件**：查看现状 / 创建（写进 fstab 做持久化）/ 调整 swappiness / 删除。标准初始化里的自动创建只覆盖"按内存定档 + `swappiness=10`"这一条路径；要换大小、换路径、替换已有 swap 就进这个菜单。不碰 swap 分区，不支持 btrfs/ZFS 上的 swap 文件，容器里无法启用 swap（脚本会检测并解释）。
 
 fstab 是这里唯一的高危写操作，所以每次修改前备份到 `/root/vps-init-backups/<时间戳>/fstab[.N]`，修改后用 `findmnt --verify` 校验；校验失败且修改前基线正常时自动从备份恢复。创建中途失败或 Ctrl+C 会删掉半成品文件。
 
 ### `8` BBR
 
-显示当前拥塞控制与队列规则，可选择写入 `/etc/sysctl.d/99-bbr.conf` 并 `sysctl -p`。内容一致时跳过写入；个别键如果已被新内核移除（比如 `tcp_fack`），只警告不中断。`tcp_congestion_control` 不是 `bbr` 时明确报错。
+**只读**：显示当前 `tcp_congestion_control` / `default_qdisc`，以及 `/etc/sysctl.d/99-bbr.conf` 是否存在（存在即说明是你自己按外部说明写的）。菜单里可以查看外部来源与风险说明，或查看当前 sysctl 值与那个文件的内容。
+
+脚本不提供参数集、不写 sysctl，所以这里没有"应用"动作；`tcp_congestion_control` 不是 `bbr` 时终检会标黄，按外部说明自行处理后再回来复查。
 
 ### `9` 终检与报告
 
@@ -297,8 +301,7 @@ fstab 是这里唯一的高危写操作，所以每次修改前备份到 `/root/
 | `/etc/ssh/sshd_config.d/01-hardening.conf` | 菜单 5（SSH 加固） |
 | `/etc/fail2ban/jail.local` | 菜单 6 |
 | `/etc/apt/apt.conf.d/20auto-upgrades` | 菜单 2 |
-| `/etc/sysctl.d/99-bbr.conf` | 菜单 8 |
-| `/etc/sysctl.d/99-swappiness.conf`、`/etc/fstab` | 菜单 7 |
+| `/etc/sysctl.d/99-swappiness.conf`、`/etc/fstab` | 菜单 7 与标准初始化第 7 步 |
 | `/etc/sudoers.d/<用户>` | 菜单 4 |
 | `~/.ssh/authorized_keys` | 菜单 4 |
 | `/root/vps-init-backups/<时间戳>/` | 所有写配置的动作（备份） |

@@ -71,7 +71,7 @@ graph TD
 | `/etc/ssh/sshd_config.d/01-hardening.conf` | 菜单 5 / 标准初始化第 5 步 | sshd 回到未加固状态 |
 | `/etc/fail2ban/jail.local` | 菜单 6 / 标准初始化第 6 步 | 回到 fail2ban 默认（盯 22，等于失效） |
 | `/etc/apt/apt.conf.d/20auto-upgrades` | 菜单 2 / 标准初始化第 2 步 | 自动安全更新关闭，终检判红 |
-| `/etc/sysctl.d/99-bbr.conf` | 菜单 8（需明确选择） | BBR 配置丢失（内核默认值） |
+| `/etc/sysctl.d/99-bbr.conf` | 无（菜单 8 只读，文件由用户按外部说明自建） | 与 `sysctl` 当前值一起显示；缺失不影响终检，只按 `tcp_congestion_control` 判黄 |
 | `/etc/sysctl.d/99-swappiness.conf`、`/etc/fstab` | 菜单 7（Swap） | swap 持久化丢失 |
 | `/etc/sudoers.d/<用户>` | 菜单 4 | sudo 免密关闭 |
 | `~/.ssh/authorized_keys` | 菜单 4 | 公钥丢失 |

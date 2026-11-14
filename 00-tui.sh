@@ -113,14 +113,18 @@ require_distro() {
 }
 
 # ============ 交互原语 ============
+# 提示后缀口径（四种，全脚本只允许这四种；中文圆括号，方括号只放输入类别/编号区间）：
+#   有默认值  （回车=默认 X）   可留空  （可留空=留空的后果）
+#   必填      （必填）          取消/返回（回车=取消）/（回车=返回）/（回车=暂不指定）
 ask_yesno() {
+  # 显示恒为小写 [y/n]，默认值写在圆括号里；输入大小写不限，只认 y/yes/n/no
   local prompt="$1" def="${2:-n}" ans hint
   case "${def}" in
-    y|Y) def=y; hint="[Y/n]" ;;
-    *)   def=n; hint="[y/N]" ;;
+    y|Y) def=y; hint="是" ;;
+    *)   def=n; hint="否" ;;
   esac
   while :; do
-    read -rp "${prompt} ${hint} " ans || return 1
+    read -rp "${prompt} [y/n]（回车=${hint}） " ans || return 1
     ans="${ans:-${def}}"
     case "${ans,,}" in
       y|yes) return 0 ;;
@@ -133,7 +137,7 @@ ask_yesno() {
 ask_input() {
   local prompt="$1" v="$2" val
   while :; do
-    read -rp "${prompt} " val || die "输入中断"
+    read -rp "${prompt}（必填）: " val || die "输入中断"
     if "${v}" "${val}"; then printf '%s' "${val}"; return 0; fi
   done
 }
@@ -142,8 +146,17 @@ ask_input_def() {
   # ask_input_def <提示> <校验函数名> <默认值>——空输入取默认值
   local prompt="$1" v="$2" def="$3" val
   while :; do
-    read -rp "${prompt} [回车=建议: ${def}] " val || die "输入中断"
+    read -rp "${prompt}（回车=默认 ${def}）: " val || die "输入中断"
     val="${val:-${def}}"
+    if "${v}" "${val}"; then printf '%s' "${val}"; return 0; fi
+  done
+}
+
+ask_input_opt() {
+  # ask_input_opt <提示> <校验函数名> <留空含义>——空输入返回空串（不是默认值）
+  local prompt="$1" v="$2" blank="$3" val
+  while :; do
+    read -rp "${prompt}（可留空=${blank}）: " val || die "输入中断"
     if "${v}" "${val}"; then printf '%s' "${val}"; return 0; fi
   done
 }
@@ -153,7 +166,7 @@ ask_input_def() {
 ask_menu() {
   local prompt="$1" max="$2" zero="${3:-返回主菜单}" input
   while :; do
-    read -rp "${prompt} [0-${max}]（回车=${zero}） " input || die "输入中断"
+    read -rp "${prompt} [0-${max}]（回车=${zero}）: " input || die "输入中断"
     input="${input:-0}"
     if [[ "${input}" =~ ^[0-9]+$ ]] && (( input <= max )); then
       # shellcheck disable=SC2034  # 由调用方读取
@@ -445,7 +458,7 @@ resolve_admin_user() {
     printf '  （无）\n'
   fi
   while :; do
-    read -rp "管理员用户名（输入上面的编号，或直接输入用户名；回车=暂不指定）: " u || die "输入中断"
+    read -rp "管理员用户名（输入编号或用户名）（回车=暂不指定）: " u || die "输入中断"
     if [[ -z "${u}" ]]; then
       warn "未指定管理员账号：本页面的写操作都会被拒绝"
       return 1
@@ -767,7 +780,7 @@ base_do_update() {
 
 base_do_extra() {
   local sel miss
-  read -rp "额外工具（空格分隔；回车=默认 ${TOOLS_EXTRA_DEFAULT}；输入 none=不装）: " sel || die "输入中断"
+  read -rp "额外工具（空格分隔；none=不装）（回车=默认 ${TOOLS_EXTRA_DEFAULT}）: " sel || die "输入中断"
   sel="${sel:-${TOOLS_EXTRA_DEFAULT}}"
   [[ "${sel}" == "none" ]] && sel=""
   if [[ -z "${sel}" ]]; then
@@ -994,7 +1007,7 @@ user_do_key_del() {
     return 0
   fi
   while :; do
-    read -rp "删除第几行？[1-${n}]（回车=取消） " pick || die "输入中断"
+    read -rp "删除第几行？[1-${n}]（回车=取消）: " pick || die "输入中断"
     [[ -z "${pick}" ]] && return 0
     if [[ "${pick}" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= n )); then break; fi
     warn "无效输入：请输入 1-${n}"
@@ -1025,7 +1038,7 @@ user_do_switch() {
     printf '  （无）\n'
   fi
   while :; do
-    read -rp "目标用户名（编号或用户名；回车=取消） " u || die "输入中断"
+    read -rp "目标用户名（编号或用户名）（回车=取消）: " u || die "输入中断"
     [[ -z "${u}" ]] && return 0
     if [[ "${u}" =~ ^[0-9]+$ ]]; then
       if (( ${#cands[@]} > 0 )) && (( u >= 1 && u <= ${#cands[@]} )); then
@@ -1307,6 +1320,18 @@ ssh_harden() {   # ssh_harden <目标端口>：写 drop-in + 双闸门；成功 
   return 0
 }
 
+fw_allow_business_port() {   # fw_allow_business_port <端口>：放行 tcp；每次先刷新规则快照，已存在则不重复添加
+  local p="$1"
+  fw_refresh
+  if fw_has_rule "${p}/tcp"; then
+    log "已存在 ${p}/tcp 放行规则（未重复添加）"
+    return 0
+  fi
+  ufw allow "${p}/tcp" || { die_action "放行业务端口 ${p}/tcp 失败"; return 1; }
+  log "已放行 ${p}/tcp"
+  return 0
+}
+
 fw_prepare_for_ssh() {   # fw_prepare_for_ssh <当前端口> <目标端口>
   local cur="$1" target="$2" p ports fresh=0
   command -v ufw >/dev/null 2>&1 || { die_action "未找到 ufw，请先安装基础工具（菜单 2）"; return 1; }
@@ -1330,11 +1355,19 @@ fw_prepare_for_ssh() {   # fw_prepare_for_ssh <当前端口> <目标端口>
   # 业务端口只在首次初始化（ufw 尚未启用）时询问一次；后续运行不按任何清单收敛，
   # 现存规则由「UFW 与 SSH」菜单直接查看与增删。
   if (( fresh )); then
-    ports="$(ask_input "本次要额外放行的业务端口（逗号分隔，如 80,443；回车=不放行）" v_ports_list)"
+    if ask_yesno "放行 80/443（HTTP/HTTPS，仅 tcp）？" n; then
+      fw_allow_business_port 80 || return 1
+      fw_allow_business_port 443 || return 1
+    else
+      log "不放行 80/443"
+    fi
+    if ! ports="$(ask_input_opt "还需放行的端口 逗号分隔，仅 tcp，例如 8080,8443" v_ports_list "不放行")"; then
+      die_action "未取得端口列表，已停止 UFW 配置（可回菜单 5 手动添加）"
+      return 1
+    fi
     for p in ${ports//,/ }; do
       [[ -n "${p}" ]] || continue
-      ufw allow "${p}/tcp" || { die_action "放行业务端口 ${p}/tcp 失败"; return 1; }
-      log "已放行业务端口 ${p}/tcp"
+      fw_allow_business_port "${p}" || return 1
     done
   else
     log "ufw 已启用：不询问业务端口，现有规则保持不变（可在菜单 5 中直接增删）"
@@ -1382,14 +1415,14 @@ fw_do_allow() {
   [[ "${op}" == "0" ]] && return 0
   ports=""
   while :; do
-    read -rp "端口（1-65535，逗号分隔可多个；回车=返回） " ports || die "输入中断"
+    read -rp "端口（1-65535，逗号分隔可多个）（回车=返回）: " ports || die "输入中断"
     [[ -z "${ports}" ]] && return 0
     if v_ports_list "${ports}"; then break; fi
   done
   src=""
   if ask_yesno "限制来源 IP（如 1.2.3.4 或 10.0.0.0/8）？" n; then
     while :; do
-      read -rp "来源地址（回车=返回） " src || die "输入中断"
+      read -rp "来源地址（回车=返回）: " src || die "输入中断"
       [[ -n "${src}" ]] && break
       return 0
     done
@@ -1429,7 +1462,7 @@ fw_do_delete() {
   if [[ "${count}" == "0" ]]; then log "当前没有可删除的规则"; return 0; fi
   num=""
   while :; do
-    read -rp "删除第几条？[1-${count}]（回车=返回） " num || die "输入中断"
+    read -rp "删除第几条？[1-${count}]（回车=返回）: " num || die "输入中断"
     [[ -z "${num}" ]] && return 0
     if [[ "${num}" =~ ^[0-9]+$ ]] && (( num >= 1 )) && (( num <= count )); then break; fi
     warn "无效输入：请输入 1-${count}"
@@ -1544,7 +1577,8 @@ fw_do_change_port() {
     warn "读不到 sshd 当前端口（sshd -T 失败），无法安全改端口"
     return 0
   fi
-  target="$(ask_input_def "新 SSH 端口（1024-65535，避开 22/2222）" v_ssh_port "$(rand_port)")"
+  target="$(ask_input_def "新 SSH 端口 1024-65535，避开 22/2222" v_ssh_port "$(rand_port)")" \
+    || { warn "输入中断，已取消改端口"; return 0; }
   if [[ "${target}" == "${cur}" ]]; then
     log "与当前生效端口相同，无需迁移"
     return 0
@@ -1586,7 +1620,7 @@ fw_do_restore() {
   done
   pick=""
   while :; do
-    read -rp "恢复第几份？[1-${#backs[@]}]（回车=返回） " pick || die "输入中断"
+    read -rp "恢复第几份？[1-${#backs[@]}]（回车=返回）: " pick || die "输入中断"
     [[ -z "${pick}" ]] && return 0
     if [[ "${pick}" =~ ^[0-9]+$ ]] && (( pick >= 1 )) && (( pick <= ${#backs[@]} )); then break; fi
     warn "无效输入：请输入 1-${#backs[@]}"
@@ -1755,9 +1789,12 @@ f2b_apply() {
     warn "先确认 sshd -T 能跑（常见：/run/sshd 缺失，mkdir -p /run/sshd）"
     return 1
   fi
-  bantime="$(ask_input_def "封禁时长（秒）" v_posint "$(f2b_param bantime 86400)")"
-  findtime="$(ask_input_def "统计窗口（秒）" v_posint "$(f2b_param findtime 600)")"
-  maxretry="$(ask_input_def "最大重试次数" v_posint "$(f2b_param maxretry 3)")"
+  bantime="$(ask_input_def "封禁时长 单位秒" v_posint "$(f2b_param bantime 86400)")" \
+    || { warn "输入中断，未写入 ${JAIL}"; return 1; }
+  findtime="$(ask_input_def "统计窗口 单位秒" v_posint "$(f2b_param findtime 600)")" \
+    || { warn "输入中断，未写入 ${JAIL}"; return 1; }
+  maxretry="$(ask_input_def "最大重试次数" v_posint "$(f2b_param maxretry 3)")" \
+    || { warn "输入中断，未写入 ${JAIL}"; return 1; }
   if ! f2b_write_jail "${port}" "${bantime}" "${findtime}" "${maxretry}"; then
     return 1
   fi
@@ -1796,11 +1833,14 @@ f2b_do_params() {
   cur_f="$(f2b_param findtime 600)"
   cur_m="$(f2b_param maxretry 3)"
   log "当前参数（来自 ${JAIL}，缺失取默认）：bantime=${cur_b} / findtime=${cur_f} / maxretry=${cur_m}"
-  v="$(ask_input_def "封禁时长（秒）" v_posint "${cur_b}")"
+  v="$(ask_input_def "封禁时长 单位秒" v_posint "${cur_b}")" \
+    || { warn "输入中断，未改动参数"; return 0; }
   local nb="$v"
-  v="$(ask_input_def "统计窗口（秒）" v_posint "${cur_f}")"
+  v="$(ask_input_def "统计窗口 单位秒" v_posint "${cur_f}")" \
+    || { warn "输入中断，未改动参数"; return 0; }
   local nf="$v"
-  v="$(ask_input_def "最大重试次数" v_posint "${cur_m}")"
+  v="$(ask_input_def "最大重试次数" v_posint "${cur_m}")" \
+    || { warn "输入中断，未改动参数"; return 0; }
   local nm="$v"
   if [[ "${nb}" == "${cur_b}" && "${nf}" == "${cur_f}" && "${nm}" == "${cur_m}" ]]; then
     log "参数未变化，未改动 ${JAIL}"
@@ -1834,7 +1874,7 @@ f2b_do_ban() {
   ask_menu "选择操作" 2
   op="${UI_REPLY}"
   [[ "${op}" == "0" ]] && return 0
-  ip="$(ask_input "IP 地址" v_ip)"
+  ip="$(ask_input "IP 地址" v_ip)" || { warn "输入中断，已取消"; return 0; }
   if [[ "${op}" == "1" ]]; then
     if ask_yesno "确认封禁 ${ip}？" n; then
       fail2ban-client set sshd banip "${ip}" || warn "封禁失败（该 IP 可能已在封禁列表中）"
@@ -1944,7 +1984,7 @@ swap_cleanup() {
   exit "${rc}"
 }
 
-# 约定: swap_ask_option / swap_ask_value 把结果写入 SWAP_ANSWER；swap_confirm 只用返回码。
+# 约定: swap_ask_option / swap_ask_value 把结果写入 SWAP_ANSWER；y/n 一律用公共 ask_yesno。
 swap_ask_option() {   # "提示" "选项1" "选项2" ... -> SWAP_ANSWER = 选中项；空回车 = 空串（取消）
   local prompt="$1"; shift
   local opts=("$@") i input max
@@ -1969,14 +2009,10 @@ swap_ask_option() {   # "提示" "选项1" "选项2" ... -> SWAP_ANSWER = 选中
   done
 }
 
-swap_ask_value() {   # "提示" "校验正则" "默认值(可空)"
-  local prompt="$1" regex="$2" default="${3-}" input
+swap_ask_value() {   # "提示" "校验正则" "默认值"（默认值必填：留空即取它）
+  local prompt="$1" regex="$2" default="$3" input
   while true; do
-    if [[ -n "${default}" ]]; then
-      printf '%s [默认: %s]: ' "${prompt}" "${default}"
-    else
-      printf '%s: ' "${prompt}"
-    fi
+    printf '%s（回车=默认 %s）: ' "${prompt}" "${default}"
     read -r input || swap_die "输入中断，退出"
     input="${input:-${default}}"
     if [[ "${input}" =~ ${regex} ]]; then
@@ -1987,23 +2023,6 @@ swap_ask_value() {   # "提示" "校验正则" "默认值(可空)"
   done
 }
 
-swap_confirm() {   # "问题" [y|n 默认值]
-  local prompt="$1" default="${2:-y}" ans
-  while true; do
-    if [[ "${default}" == "y" ]]; then
-      printf '%s [Y/n]: ' "${prompt}"
-    else
-      printf '%s [y/N]: ' "${prompt}"
-    fi
-    read -r ans || swap_die "输入中断，退出"
-    ans="${ans:-${default}}"
-    case "${ans}" in
-      [Yy]*) return 0 ;;
-      [Nn]*) return 1 ;;
-      *) swap_warn "请输入 y 或 n" ;;
-    esac
-  done
-}
 
 swap_get_mem_mb()     { free -m | awk '/^Mem:/{print $2}'; }
 swap_get_mem_h()      { free -h | awk '/^Mem:/{print $2}'; }
@@ -2187,7 +2206,7 @@ swap_do_create() {
   if ((${#active[@]} > 0)); then
     swap_warn "检测到已启用的 swap 文件:"
     printf '  %s\n' "${active[@]}"
-    if swap_confirm "替换 = 先删除以上 swap 文件，再创建新的。是否继续替换?" "y"; then
+    if ask_yesno "替换 = 先删除以上 swap 文件，再创建新的。是否继续替换？" y; then
       for f in "${active[@]}"; do
         swap_delete_file "${f}" || swap_die "替换失败: 无法删除旧 swap 文件 ${f}"
       done
@@ -2216,7 +2235,7 @@ swap_do_create() {
     "8G"*) size_mb=8192 ;;
     *)
       while true; do
-        swap_ask_value "自定义大小（如 2G、512M，纯数字按 MB 计算）" '^[0-9]+[GgMm]?$' "1024"
+        swap_ask_value "自定义大小 例如 2G、512M，纯数字按 MB 计算" '^[0-9]+[GgMm]?$' "1024"
         size_mb=$(swap_size_to_mb "$SWAP_ANSWER") || { swap_warn "无法解析大小"; continue; }
         if (( size_mb < SWAP_MIN_MB )); then
           swap_warn "Swap 至少需要 ${SWAP_MIN_MB}MB"
@@ -2264,12 +2283,12 @@ swap_do_create() {
   fi
   if (( avail_mb - size_mb < SWAP_WARN_FREE_MB )); then
     swap_warn "创建后该分区剩余空间仅 $((avail_mb - size_mb))M（不足 ${SWAP_WARN_FREE_MB}M），系统运行可能紧张"
-    swap_confirm "仍要继续?" "n" || { swap_info "已取消。"; return 0; }
+    ask_yesno "仍要继续？" n || { swap_info "已取消。"; return 0; }
   fi
 
   cur_sw=$(swap_get_swappiness_default)
-  if swap_confirm "是否同时调整 swappiness（当前: ${cur_sw}）?" "y"; then
-    swap_ask_value "swappiness 值（0-100，VPS 常用 10）" "${SWAP_SWAPPINESS_RE}" "10"
+  if ask_yesno "是否同时调整 swappiness（当前: ${cur_sw}）？" y; then
+    swap_ask_value "swappiness 值 0-100，VPS 常用 10" "${SWAP_SWAPPINESS_RE}" "10"
     new_sw=$SWAP_ANSWER
   fi
 
@@ -2281,7 +2300,7 @@ swap_do_create() {
     printf '  swappiness:  %s -> %s\n' "${cur_sw}" "${new_sw}"
   fi
   printf '%s=============%s\n' "${C_B}" "${C_0}"
-  swap_confirm "确认执行?" "y" || { swap_info "已取消。"; return 0; }
+  ask_yesno "确认执行？" y || { swap_info "已取消。"; return 0; }
 
   SWAP_PARTIAL_FILE="${path}"
 
@@ -2303,7 +2322,7 @@ swap_do_create() {
     local virt
     virt=$(systemd-detect-virt 2>/dev/null || true)
     case "${virt}" in
-      openvz|lxc)
+      openvz|lxc|lxc-libvirt|docker|podman|systemd-nspawn)
         swap_err "swapon 失败: 当前运行在 ${virt} 容器中，内核不允许自行启用 swap。"
         swap_err "此类 VPS 无法使用本流程创建 swap（如需 swap 请联系服务商）。"
         ;;
@@ -2345,7 +2364,7 @@ swap_do_swappiness() {
   else
     swap_info "尚无独立配置文件，将创建: ${SWAP_SYSCTL_CONF}"
   fi
-  swap_ask_value "新的 swappiness 值（0-100）" "${SWAP_SWAPPINESS_RE}" "$(swap_get_swappiness_default)"
+  swap_ask_value "新的 swappiness 值 0-100" "${SWAP_SWAPPINESS_RE}" "$(swap_get_swappiness_default)"
   val=$SWAP_ANSWER
   if [[ "${val}" == "$(swap_get_swappiness)" ]]; then
     swap_info "与当前值相同，未修改。"
@@ -2384,14 +2403,14 @@ swap_do_delete() {
     else
       prompt="确认清理 ${f} ?（当前未启用，仅删除文件 + 移除 fstab 条目）"
     fi
-    if swap_confirm "${prompt}" "n"; then
+    if ask_yesno "${prompt}" n; then
       swap_delete_file "${f}" || swap_err "删除 ${f} 失败，已跳过"
     fi
   done
 
   mapfile -t files < <(swap_active_files)
   if ((${#files[@]} == 0)) && [[ -f "${SWAP_SYSCTL_CONF}" ]] \
-     && swap_confirm "是否同时移除 swappiness 配置（${SWAP_SYSCTL_CONF}）?" "n"; then
+     && ask_yesno "是否同时移除 swappiness 配置（${SWAP_SYSCTL_CONF}）？" n; then
     rm -f -- "${SWAP_SYSCTL_CONF}"
     sysctl -w vm.swappiness=60 >/dev/null
     swap_ok "已移除 ${SWAP_SYSCTL_CONF}；运行时 swappiness 已设为 60（Debian/Ubuntu 默认值），重启后同样生效"
@@ -2447,107 +2466,112 @@ run_swap_menu() {
   )
 }
 
-# ============ 模块 8：BBR ============
-# 目标配置：BBR + fq + TCP 调优（外部获取的调参集，逐行可审；参数为作者本机特调）
-read -r -d '' BBR_CONTENT <<'EOF' || true
-kernel.pid_max = 65535
-kernel.panic = 1
-kernel.sysrq = 1
-kernel.core_pattern = core_%e
-kernel.printk = 3 4 1 3
-kernel.numa_balancing = 0
-kernel.sched_autogroup_enabled = 0
-
-vm.swappiness = 10
-vm.dirty_ratio = 10
-vm.dirty_background_ratio = 5
-vm.panic_on_oom = 1
-vm.overcommit_memory = 1
-vm.min_free_kbytes = 64194
-
-net.core.default_qdisc = fq
-net.core.netdev_max_backlog = 2000
-net.core.rmem_max = 8388608
-net.core.wmem_max = 8388608
-net.core.rmem_default = 87380
-net.core.wmem_default = 65536
-net.core.somaxconn = 256
-net.core.optmem_max = 32768
-
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_timestamps = 1
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 10
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_max_tw_buckets = 32768
-net.ipv4.tcp_sack = 1
-net.ipv4.tcp_fack = 0
-
-net.ipv4.tcp_rmem = 8192 87380 748300
-net.ipv4.tcp_wmem = 8192 65536 374150
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_notsent_lowat = 4096
-net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_adv_win_scale = 3
-net.ipv4.tcp_moderate_rcvbuf = 1
-net.ipv4.tcp_no_metrics_save = 0
-
-net.ipv4.tcp_max_syn_backlog = 2048
-net.ipv4.tcp_max_orphans = 65536
-net.ipv4.tcp_synack_retries = 2
-net.ipv4.tcp_syn_retries = 3
-net.ipv4.tcp_abort_on_overflow = 0
-net.ipv4.tcp_stdurg = 0
-net.ipv4.tcp_rfc1337 = 0
-net.ipv4.tcp_syncookies = 1
-
-net.ipv4.ip_local_port_range = 1024 65535
-net.ipv4.ip_no_pmtu_disc = 0
-net.ipv4.route.gc_timeout = 100
-net.ipv4.neigh.default.gc_stale_time = 120
-net.ipv4.neigh.default.gc_thresh3 = 8192
-net.ipv4.neigh.default.gc_thresh2 = 4096
-net.ipv4.neigh.default.gc_thresh1 = 1024
-
-net.ipv4.icmp_echo_ignore_broadcasts = 1
-net.ipv4.icmp_ignore_bogus_error_responses = 1
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.default.rp_filter = 1
-net.ipv4.conf.all.arp_announce = 2
-net.ipv4.conf.default.arp_announce = 2
-net.ipv4.conf.all.arp_ignore = 1
-net.ipv4.conf.default.arp_ignore = 1
-EOF
-
-bbr_apply() {
-  local cc qc
-  # 幂等：内容一致则跳过写入
-  if [[ -f "${BBR_CONF}" ]] && diff -q <(printf '%s\n' "${BBR_CONTENT}") "${BBR_CONF}" >/dev/null 2>&1; then
-    log "配置已存在且一致：${BBR_CONF}，跳过写入"
+swap_auto_swappiness() {   # 自动路径固定 vm.swappiness=10
+  local cur_sw
+  cur_sw="$(swap_get_swappiness)"
+  if [[ "${cur_sw}" == "10" ]]; then
+    swap_info "swappiness 已是 10（未改动）"
   else
-    backup_file "${BBR_CONF}" >/dev/null || true
-    if ! printf '%s\n' "${BBR_CONTENT}" > "${BBR_CONF}"; then
-      die_action "写入 ${BBR_CONF} 失败"
-      return 1
-    fi
-    log "已写入 ${BBR_CONF}"
+    swap_write_swappiness 10
   fi
-  # 应用；个别键在当前内核不存在时（如 tcp_fack 已移除）仅警告
-  if ! sysctl -p "${BBR_CONF}"; then
-    warn "部分键应用失败（新版内核可能已移除个别键，如 tcp_fack），请核对上方报错行"
-  fi
-  cc="$(bbr_cc)"
-  qc="$(bbr_qdisc)"
-  if [[ "${cc}" != "bbr" ]]; then
-    warn "tcp_congestion_control = ${cc:-未知}，非 bbr；请检查内核版本（需 >= 4.9）"
-    return 1
-  fi
-  if [[ "${qc}" != "fq" ]]; then
-    warn "default_qdisc = ${qc:-未知}，非 fq（BBR 仍工作，但推荐 fq）"
-  fi
-  log "BBR 已启用（congestion_control=${cc}, qdisc=${qc}）"
   return 0
+}
+
+swap_auto_create() {   # swap_auto_create <大小MB>：标准初始化用，全程无交互
+  local size_mb="$1" path="/swapfile" fstype avail_mb virt
+
+  fstype="$(swap_get_fstype_of /)"
+  case "${fstype}" in
+    btrfs|zfs)
+      swap_warn "根分区文件系统为 ${fstype}，不支持常规方式的 swap 文件——跳过（菜单 7 也无法处理）"
+      return 0 ;;
+    "")
+      swap_warn "无法识别根分区文件系统类型——跳过自动创建，可用菜单 7 手动尝试"
+      return 0 ;;
+  esac
+  virt="$(systemd-detect-virt 2>/dev/null || true)"
+  case "${virt}" in
+    openvz|lxc|lxc-libvirt|docker|podman|systemd-nspawn)
+      swap_warn "当前运行在 ${virt} 容器中，内核不允许自行启用 swap——跳过"
+      return 0 ;;
+  esac
+  if [[ -e "${path}" ]]; then
+    if swap_fstab_has "${path}"; then
+      if ! swapon "${path}" 2>/dev/null; then
+        swap_err "重新启用 ${path} 失败（dmesg | tail 查看原因）——跳过"
+        return 0
+      fi
+      swap_ok "已重新启用现有 ${path}（fstab 条目已存在，未重建）"
+      swap_auto_swappiness
+      return 0
+    fi
+    swap_warn "${path} 已存在但 fstab 无对应条目：为避免覆盖未知文件，跳过自动创建（请用菜单 7 手动处理）"
+    return 0
+  fi
+  avail_mb="$(swap_get_avail_mb /)"
+  if ! [[ "${avail_mb}" =~ ^[0-9]+$ ]]; then
+    swap_warn "无法获取根分区剩余空间——跳过自动创建"
+    return 0
+  fi
+  if (( size_mb > avail_mb )); then
+    swap_warn "根分区剩余 ${avail_mb}M 不足 ${size_mb}M——跳过自动创建"
+    return 0
+  fi
+  if (( avail_mb - size_mb < SWAP_WARN_FREE_MB )); then
+    swap_warn "创建后根分区仅剩 $((avail_mb - size_mb))M（不足 ${SWAP_WARN_FREE_MB}M）——跳过自动创建，请用菜单 7 手动确认"
+    return 0
+  fi
+
+  SWAP_PARTIAL_FILE="${path}"
+  swap_info "1/5 创建文件（${size_mb}M）..."
+  if ! fallocate -l "${size_mb}M" "${path}" 2>/dev/null; then
+    swap_warn "fallocate 不可用（${fstype} 可能不支持），改用 dd 逐块写入，无进度显示，请耐心等待..."
+    dd if=/dev/zero of="${path}" bs=1M count="${size_mb}" status=none 2>/dev/null \
+      || swap_die "创建文件失败"
+  fi
+  swap_info "2/5 设置权限（600）..."
+  chmod 600 "${path}" || swap_die "chmod 失败"
+  swap_info "3/5 格式化为 swap..."
+  mkswap "${path}" >/dev/null || swap_die "mkswap 失败"
+  swap_info "4/5 启用 swap..."
+  swapon "${path}" 2>/dev/null || swap_die "swapon ${path} 失败（dmesg | tail 查看原因）"
+  swap_ok "  swap 已启用"
+  swap_info "5/5 写入 fstab 实现开机持久化..."
+  if swap_fstab_has "${path}"; then
+    swap_info "${SWAP_FSTAB} 已存在 ${path} 条目，跳过写入"
+  else
+    swap_fstab_append "${path}"
+  fi
+  SWAP_PARTIAL_FILE=""
+
+  swap_auto_swappiness
+  printf '\n'
+  swap_ok "完成！当前内存状态:"
+  swap_show_free_h
+  return 0
+}
+
+run_swap_auto() {   # run_swap_auto <大小MB>：与 run_swap_menu 同一子 shell 契约
+  (
+    set +e
+    set -uo pipefail
+    trap - ERR
+    trap 'swap_cleanup' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    swap_auto_create "$1"
+  )
+}
+
+# ============ 模块 8：BBR ============
+# 只读模块：不内置、不写入任何 TCP 调优参数集，只显示当前状态与外部来源指引。
+BBR_SITE="https://omnitt.com"
+
+bbr_external_notes() {
+  printf '  本程序不提供 BBR/TCP 调优参数集，也不会写入任何 sysctl 调优配置。\n'
+  printf '  需要调优时按外部来源自行获取：%s\n' "${BBR_SITE}"
+  printf '  本项目不提供、不维护该站点的脚本，也未对当前在线版本完成安全审计。\n'
+  printf '  只有在你自行审阅并接受以 root 执行第三方代码的风险后才应用；应用前确认已创建 Snapshot。\n'
 }
 
 bbr_do_show() {
@@ -2557,7 +2581,7 @@ bbr_do_show() {
   if [[ -f "${BBR_CONF}" ]]; then
     cat "${BBR_CONF}"
   else
-    warn "未找到 ${BBR_CONF}（尚未应用调优配置）"
+    warn "未找到 ${BBR_CONF}（本程序不写入该文件；若已按外部说明自行应用，请确认路径）"
   fi
   return 0
 }
@@ -2567,31 +2591,23 @@ bbr_menu() {
   while :; do
     cc="$(bbr_cc)"
     qc="$(bbr_qdisc)"
-    if [[ -f "${BBR_CONF}" ]]; then cfg_state="已写入"; else cfg_state="$(ui_no '未写入')"; fi
+    if [[ -f "${BBR_CONF}" ]]; then cfg_state="已存在（非本程序写入）"; else cfg_state="$(ui_no '不存在')"; fi
     scr_clear
     ui_rule
-    printf '%s BBR 与 TCP 调优%s\n' "${C_B}" "${C_0}"
+    printf '%s BBR%s\n' "${C_B}" "${C_0}"
     ui_sep
     ui_kv "拥塞控制" "$( [[ "${cc}" == "bbr" ]] && printf '%s' "$(ui_yes 'bbr ✓')" || printf '%s' "$(ui_no "${cc}")" )"
     ui_kv "队列规则" "${qc}"
     ui_kv "配置文件" "${cfg_state}"
     ui_sep
-    printf '  %s注意：本程序的调优参数是作者本机特调，不一定适合你的线路与内存。%s\n' "${C_Y}" "${C_0}"
-    ui_sep
-    ui_item 1 "应用 BBR + TCP 调优（写 ${BBR_CONF}）"
+    ui_item 1 "查看外部来源与风险说明"
     ui_item 2 "查看当前 sysctl 值与配置文件"
     ui_quit
     ui_sep
     ask_menu "选择操作" 2
     case "${UI_REPLY}" in
       0) return 0 ;;
-      1)
-        if ask_yesno "确认应用作者特调的 BBR/TCP 参数？" n; then
-          act bbr_apply || true
-        else
-          log "已取消，未改动 sysctl 配置"
-        fi
-        ;;
+      1) printf '\n'; bbr_external_notes ;;
       2) bbr_do_show ;;
     esac
     page_wait "按回车返回 BBR 菜单…"
@@ -2785,7 +2801,7 @@ timezone_do_set() {
   current="$(cur_tz)"
   printf '当前时区：%s\n' "${current}"
   printf '可用时区列表：timedatectl list-timezones\n'
-  read -rp "输入完整时区名称（回车取消）: " tz || die "输入中断"
+  read -rp "输入完整时区名称（回车=取消）: " tz || die "输入中断"
   if [[ -z "${tz}" ]]; then
     log "已取消时区修改"
     return 0
@@ -2855,7 +2871,7 @@ flow_abort() {   # 中止剩余步骤（不跳过闸门、不做后续写入）
 }
 
 do_standard_init() {
-  local cur target tz change_sources=0
+  local cur target tz change_sources=0 size_mb
   scr_clear
   ui_rule
   printf '%s 标准初始化%s\n' "${C_B}" "${C_0}"
@@ -3017,7 +3033,8 @@ do_standard_init() {
   fi
   if [[ "${cur}" == "22" || "${cur}" == "2222" ]]; then
     log "sshd 当前端口 ${cur}（常用端口），建议改用自定义端口"
-    target="$(ask_input_def "目标 SSH 端口（1024-65535，避开 22/2222）" v_ssh_port "$(rand_port)")"
+    target="$(ask_input_def "目标 SSH 端口 1024-65535，避开 22/2222" v_ssh_port "$(rand_port)")" \
+      || { flow_abort "输入中断，未取得目标 SSH 端口"; return 1; }
   else
     target="${cur}"
     log "sshd 已在自定义端口 ${cur}：沿用该端口"
@@ -3040,27 +3057,40 @@ do_standard_init() {
     fi
   fi
 
-  # ---- 步骤 7：Swap（可选，默认跳过） ----
+  # ---- 步骤 7：Swap（自动：按内存定档 + swappiness=10） ----
   step_banner 7 "Swap"
   if swap_active; then
     log "swap 已启用（$(swap_summary)），跳过创建"
   else
-    log "swap 未启用"
-    if ask_yesno "现在进入 Swap 创建流程？" n; then
-      run_swap_menu || true
+    size_mb="$(swap_recommend_mb)"
+    printf '  当前内存： %s；swap 未启用\n' "$(free -h 2>/dev/null | awk '/^Mem:/{print $2}')"
+    printf '  将创建：   /swapfile %sM，写入 fstab 持久化，并设 vm.swappiness=10\n' "${size_mb}"
+    if ask_yesno "按以上默认自动创建 swap？" y; then
+      if ! run_swap_auto "${size_mb}"; then
+        if swap_active; then
+          warn "swap 已启用，但自动流程未全部完成（见上方说明）；可回菜单 7 复查 swappiness"
+        else
+          warn "Swap 未创建成功（见上方说明），继续后续步骤；可用菜单 7 手动处理"
+        fi
+      fi
     else
       log "跳过 Swap（内存充裕时可接受）"
     fi
   fi
 
-  # ---- 步骤 8：BBR（可选，默认不应用） ----
+  # ---- 步骤 8：BBR（只读：参数由用户自行从外部获取） ----
   step_banner 8 "BBR 与 TCP 调优"
   printf '  当前拥塞控制： %s（qdisc %s）\n' "$(bbr_cc)" "$(bbr_qdisc)"
-  printf '  %s本程序的调优参数是作者本机特调，不一定适合你的机器。%s\n' "${C_Y}" "${C_0}"
-  if ask_yesno "应用 BBR + TCP 调优？" n; then
-    bbr_apply || warn "BBR 应用未完全成功，终检会按当前状态提示"
+  bbr_external_notes
+  if ask_yesno "已按外部说明自行应用完成？" n; then
+    printf '  重新检测：拥塞控制 = %s（qdisc %s）\n' "$(bbr_cc)" "$(bbr_qdisc)"
+    if [[ "$(bbr_cc)" == "bbr" ]]; then
+      log "BBR 已启用"
+    else
+      warn "拥塞控制仍为 $(bbr_cc)：终检会把 BBR 标黄，可稍后回来复查"
+    fi
   else
-    log "跳过 BBR（不改动 sysctl 配置）"
+    log "跳过 BBR（本程序不写入任何 sysctl 调优参数）"
   fi
 
   # ---- 步骤 9：自动更新复核 + Docker 提示 + 终检 ----
@@ -3132,7 +3162,7 @@ draw_main_menu() {
 ask_main() {
   local input
   while :; do
-    read -rp "选择 [0-9]（q 退出）: " input || die "输入中断"
+    read -rp "选择 [0-9]（q=退出）: " input || die "输入中断"
     case "${input}" in
       q|Q) MAIN_REPLY="q"; return 0 ;;
       0|1|2|3|4|5|6|7|8|9) MAIN_REPLY="${input}"; return 0 ;;
