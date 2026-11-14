@@ -25,19 +25,15 @@ bash <(curl -Lso- bench.sh)                  # 输出系统信息 + 网络测速
 - 记录安全组当前放行规则——注意放行的是不是上面查到的那个端口
 - **创建初始 Snapshot**——后面所有步骤的最终退路，唯一不可替代的一步
 
-国内服务器建议先换源（默认官方源国内访问慢）。换源在步骤 1 之前做，海外服务器跳过：
+国内服务器可在系统更新前换源；此处排在 Snapshot 确认之后。主菜单 `1` 只展示第三方来源和命令，TUI 不下载或运行该脚本。标准初始化一开始会询问是否换源；回答是时，先通过 Snapshot 闸门，再在另一个 root 终端手动运行并返回确认。
 
 ```bash
 bash <(curl -fsSL https://linuxmirrors.cn/main.sh)
 ```
 
-这是 SuperManito 的 [LinuxMirrors](https://linuxmirrors.cn) 开源换源脚本（MIT，支持 Debian/Ubuntu 等主流系统）。运行后按提示操作：
+这是 SuperManito 的 [LinuxMirrors](https://linuxmirrors.cn) 第三方脚本；上游标注 MIT，但本项目未完成当前在线版本的全量安全审计。以 root 执行前自行检查并承担风险。运行后按提示选镜像站和协议，确认备份已有源；若后面继续标准初始化，选择不更新、不升级软件包（标准流程会处理升级）。
 
-1. 选一个镜像站（阿里云 / 腾讯云 / 清华 / 中科大等都行，一般选第一个阿里云）
-2. 选协议——有 HTTPS 选 HTTPS
-3. 问"是否备份已有源"选是；问"是否更新软件源"和"是否升级软件包"——如果接下来要做步骤 1，这里可以直接选否（步骤 1 会做）；问清理缓存随意
-
-脚本会自动改 `/etc/apt/sources.list`（Debian 13 起是 `sources.list.d/debian.sources`，Ubuntu 24.04 起是 `ubuntu.sources`），改动前自动备份为 `.bak`。
+脚本会改 APT 源文件（例如 `/etc/apt/sources.list`、`sources.list.d/debian.sources` 或 `ubuntu.sources`），上游说明会在修改前备份。参数列表可运行 `--help` 查看：
 
 不想一步步点，可以直接用参数跳过去（完整列表跑 `--help` 查看）：
 
@@ -95,11 +91,11 @@ apt install -y sudo ca-certificates curl wget gnupg ufw fail2ban \
 
 ```bash
 hostnamectl set-hostname <主机名>            # 可选，保持厂商默认可跳过
-timedatectl set-timezone Asia/Shanghai
-timedatectl                                  # 确认 "NTP service: active"
+timedatectl list-timezones                      # 查看有效时区名称
+timedatectl set-timezone <时区>                 # 例如 Asia/Shanghai
 ```
 
-服务器时间不准会出各种怪问题（登录记录时间错乱、HTTPS 证书报错），所以确认时间同步是开着的。
+标准流程接受系统提供的任一有效时区，仍要求 NTP service 为 active；脚本不自动修改 NTP。主菜单 `3` 可交互修改时区并复查设置结果。
 
 ## 4. 创建管理员用户 + 公钥
 
@@ -124,13 +120,15 @@ chmod 600 /home/<用户名>/.ssh/authorized_keys
 chown -R <用户名>:<用户名> /home/<用户名>/.ssh
 ```
 
-> **⚠️ 停下来验证**：本地新开一个终端，`ssh <用户名>@<host>` 能登上、`sudo -v` 不报错——都通过了再继续。**登不上就停下排查，别往下做**（后面会把密码登录关掉，到时候只能靠这个密钥进机器）。
+> **⚠️ 停下来验证**：保持当前 root 会话开启；本地新开终端，用 `ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no -p <当前端口> <用户名>@<host>` 强制验证公钥登录（端口为 22 时可省略 `-p`）。登录后执行 `sudo -v`，退出码为 0 才通过；sudo 自己提示密码不代表 SSH 使用了密码认证。**登不上或 sudo 失败就停下排查**，不要继续 SSH 加固。
+
+如果有效 `AllowUsers` 仅允许 root，新用户在当前策略下无法登录。先准备非 root 用户与公钥，再手动让现有规则允许它、保持 root 会话并验证密钥登录；之后重跑标准流程。
 
 ## 5–6. 防火墙 + SSH 加固
 
 ### UFW 防火墙
 
-> 脚本版在 `00-tui.sh` 的菜单 `3`：进入只显示状态，查看规则、放行、删规则、启停、改默认策略都要再选一次动作。标准初始化（菜单 `0` 第 5 步）会自动先配防火墙再加固。这一节保留手动等价做法，便于理解每步在干什么。
+> 脚本版在 `00-tui.sh` 的菜单 `5`：进入只显示状态，查看规则、放行、删规则、启停、改默认策略都要再选一次动作。标准初始化（菜单 `0` 第 5 步）会自动先配防火墙再加固。这一节保留手动等价做法，便于理解每步在干什么。
 
 先想好新的 SSH 端口（别用 22 和 2222；不想挑就用 `shuf -i 10000-65535 -n 1` 生成一个随机数），然后：
 
@@ -149,7 +147,7 @@ ufw status verbose                           # 检查点：当前端口和新端
 
 ### SSH 加固
 
-> 脚本版在 `00-tui.sh` 菜单 `3`：`6` 用当前生效端口重新加固，`7` 改端口并加固（两者都过双闸门），`8` 看生效值与加固文件，`9` 从备份恢复。标准初始化第 5 步会自动走一遍。
+> 脚本版在 `00-tui.sh` 菜单 `5`：`6` 用当前生效端口重新加固，`7` 改端口并加固（两者都过双闸门），`8` 看生效值与加固文件，`9` 从备份恢复。标准初始化第 5 步会自动走一遍。
 
 ```bash
 ls /etc/ssh/sshd_config.d/                   # 看有没有 50-cloud-init.conf 之类的覆盖文件
@@ -193,11 +191,11 @@ systemctl reload ssh
 ufw delete allow <当前端口>/tcp              # 旧端口确认无用后删
 ```
 
-万一锁在门外：云控制台/VNC 进去，把备份文件恢复回去，再 `systemctl reload ssh` 就回来了。所以第 0 步的 Snapshot 一定要拍。（脚本版锁死时同样的恢复动作可从 `00-tui.sh` 菜单 `3` → `9` 做：挑一份 `/root/vps-init-backups/<时间戳>/01-hardening.conf`，它会先 `sshd -t` 校验、必要时先放行端口再问你是否重启 sshd。）
+万一锁在门外：云控制台/VNC 进去，把备份文件恢复回去，再 `systemctl reload ssh` 就回来了。所以第 0 步的 Snapshot 一定要拍。（脚本版锁死时同样可从 `00-tui.sh` 菜单 `5` → `9` 恢复：挑一份 `/root/vps-init-backups/<时间戳>/01-hardening.conf`，它会先 `sshd -t` 校验、必要时先放行端口再问你是否重启 sshd。）
 
 ## 7. fail2ban
 
-> 脚本版在 `00-tui.sh` 菜单 `4`：安装与写配置由 `1` 触发，`2` 看详情，`3` 改参数，`4` 封禁/解封。这一节保留手动等价做法，便于理解每步在干什么。
+> 脚本版在 `00-tui.sh` 菜单 `6`：安装与写配置由 `1` 触发，`2` 看详情，`3` 改参数，`4` 封禁/解封。这一节保留手动等价做法，便于理解每步在干什么。
 
 ```bash
 nano /etc/fail2ban/jail.local
@@ -250,7 +248,7 @@ sysctl -p /etc/sysctl.d/99-bbr.conf
 sysctl net.ipv4.tcp_congestion_control       # 检查点：输出 bbr
 ```
 
-想进一步调网络参数的话，`00-tui.sh` 菜单 `6` 有一份完整参数集（写 `/etc/sysctl.d/99-bbr.conf`），但那份是为特定场景调的，不懂每项含义别照抄——所以脚本默认不应用，要你明确选择才写。
+想进一步调网络参数的话，`00-tui.sh` 菜单 `8` 有一份完整参数集（写 `/etc/sysctl.d/99-bbr.conf`），但那份是为特定场景调的，不懂每项含义别照抄——所以脚本默认不应用，要你明确选择才写。
 
 ## 10. 自动安全更新
 
@@ -301,7 +299,7 @@ bash <(curl -fsSL https://linuxmirrors.cn/docker.sh) --source mirrors.aliyun.com
 
 ## 12. 终检
 
-把下面命令挨个跑一遍，输出符合注释就是通过（脚本 `00-tui.sh` 菜单 `7` 自动做的就是这些，结果写入 `/root/vps-init-report.md`）：
+把下面命令挨个跑一遍，输出符合注释就是通过（脚本 `00-tui.sh` 菜单 `9` 自动做的就是这些，结果写入 `/root/vps-init-report.md`）：
 
 ```bash
 sshd -T | grep -Ei 'port|passwordauthentication|permitrootlogin'

@@ -18,7 +18,7 @@ ADR-0001 把交付形态定为「raw 单文件 + 自包含 + 无编排器」，�
 
 1. **单一 raw 入口 `00-tui.sh`**。所有能力（更新、用户、UFW/SSH、fail2ban、Swap、BBR、终检）并入一个自包含脚本；不再保留步骤脚本或转发壳。启动只做环境前置检查（root / TTY / 发行版）与状态探测，不安装软件、不初始化系统、不写文件。
 2. **以系统原生状态取代项目私有状态**。删除 `CONF` 与全部 `conf_*` 读写，不迁移、不读取、不创建、不自动删除旧 VPS 上的 `/root/.vps-init.conf`。数据来源固定：`sshd -T`（有效配置）、`ss -tlnp`（监听）、`ufw status numbered` / `ufw show added`（规则）、`~/.ssh/authorized_keys`（公钥）、`passwd -S`（密码）、`sudo -l -U`（有效 sudo 权限）、`fail2ban-client status sshd` + `/etc/fail2ban/jail.local`、`/proc/swaps` + `/etc/fstab`、`sysctl`、`/etc/apt/apt.conf.d/20auto-upgrades`。服务所需的原生配置文件仍照旧创建与修改——它们是服务的持久状态，不是本项目的缓存。
-3. **主菜单固定编号**：`0` 标准初始化、`1` 系统更新与基础工具、`2` 用户、密码、sudo 和密钥、`3` UFW 与 SSH、`4` fail2ban、`5` Swap、`6` BBR、`7` 终检与报告、`q` 退出。每个功能编号只打开状态页/子菜单，进入不触发任何写操作，必须再显式选动作。
+3. **主菜单固定编号**：`0` 标准初始化、`1` 换源说明、`2` 系统更新与基础工具、`3` 时区、`4` 用户、密码、sudo 和密钥、`5` UFW 与 SSH、`6` fail2ban、`7` Swap、`8` BBR、`9` 终检与报告、`q` 退出。每个功能编号只打开状态页/子菜单，进入不触发任何写操作，必须再显式选动作。
 4. **Bash 内置 ANSI 清屏**，不依赖 `dialog` / `whiptail`。仅当 stdout 是 TTY 且 `TERM` 可用、非 `dumb` 时清屏：启动绘制菜单前、切换页面前、用户确认看完动作输出后。动作输出、错误诊断、云平台/双闸门提示在用户确认前不清屏；无效输入不整页重绘。
 5. **`08` 的交互风格降级为模块**：Swap 段保留其自有 helper 与 `set -uo pipefail`（不开 `-e`），私有符号统一 `swap_` 前缀，由无参数 `run_swap_menu()` 在子 shell 中关闭 `-e` 与 ERR trap 并安装原有 EXIT/INT/TERM 清理语义，选项与 trap 不外泄到主 TUI。
 6. **动作隔离**：菜单动作统一经 `act` 调用（临时关闭 `-e` 与 ERR trap，动作内每个危险步骤显式 `|| die_action` / `if !` 判错），保证 TUI 在动作失败后仍然存活。启动前置检查与输入中断仍用 `die`（进程已无法继续）。

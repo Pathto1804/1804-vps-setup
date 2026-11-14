@@ -7,7 +7,7 @@
 ```bash
 bash -n 00-tui.sh && shellcheck -S warning 00-tui.sh   # 改完必须双绿
 bash tools/sync_check.sh                               # 必须输出「一致性 OK」
-# 真机验收：Snapshot 保护的 VPS 上走全流程（改菜单 0/3 时必须）
+# 真机验收：Snapshot 保护的 VPS 上走全流程（改标准初始化或 UFW/SSH 行为时必须）
 ```
 
 `sync_check` 输出 `=== 一致性 OK ===` 才算过。它检查不到语法与行为，所以 `bash -n` + `shellcheck` 是它前面的闸。

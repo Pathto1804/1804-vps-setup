@@ -13,13 +13,15 @@
 | 编号 | 功能 |
 |---|---|
 | `0` | 标准初始化 |
-| `1` | 系统更新与基础工具 |
-| `2` | 用户、密码、sudo 和密钥 |
-| `3` | UFW 与 SSH |
-| `4` | fail2ban |
-| `5` | Swap |
-| `6` | BBR |
-| `7` | 终检与报告 |
+| `1` | 换源说明（第三方脚本；只显示命令，不自动执行） |
+| `2` | 系统更新与基础工具 |
+| `3` | 时区 |
+| `4` | 用户、密码、sudo 和密钥 |
+| `5` | UFW 与 SSH |
+| `6` | fail2ban |
+| `7` | Swap |
+| `8` | BBR |
+| `9` | 终检与报告 |
 | `q` | 退出 |
 
 ---
@@ -30,10 +32,10 @@
 
 | 步 | 动作 | 停点 |
 |---|---|---|
-| 1 | 显示 `/etc/os-release`、CPU、内存、磁盘、当前 SSH 端口 | 必须确认已建初始 Snapshot、知晓安全组端口、备好密钥；拒绝即中止，无任何系统变更 |
+| 1 | 一开始询问是否换源；显示环境与当前 SSH 端口 | 必须确认初始 Snapshot、安全组端口、密钥；换源选择只在 Snapshot 确认后转为人工步骤，拒绝 Snapshot 即中止且不改系统 |
 | 2 | `apt-get update`；`apt-get -s full-upgrade` 有事务才 `full-upgrade -y`；补齐 `BASE`；选装可选工具；`ua_enable`；`maybe_reboot` | 需要重启时询问，选重启即结束本次流程 |
-| 3 | 显示时区与 NTP | 时区不是 `Asia/Shanghai` 或 NTP 未 active → 打印手动命令并暂停；复检仍不达标即中止，**不改这两项设置** |
-| 4 | 解析管理员（`--allow-new`）→ `adduser` + 复查存在性 + 加入 sudo 组（任一步失败即中止）→ 密码（缺才问，写后复查 `passwd -S`）→ sudo 免密（默认不，写后复查 `sudo -l`）→ 公钥（0 把时必须补） | 必须确认新终端密钥登录 + `sudo -v` 通过，否则中止 |
+| 3 | 检查当前时区与 NTP | 时区须是 `timedatectl list-timezones` 返回的有效值，接受任一有效时区；NTP 未 active 时暂停复检，仍未 active 即中止；不自动改 NTP |
+| 4 | 解析非 root 管理员（`--allow-new`）→ `adduser` + 复查存在性 + 加入 sudo 组 → 密码 / sudo 免密 → 公钥 | 必须在新终端强制公钥登录并通过 `sudo -v`；有效 `AllowUsers` 仅允许 root 时停止，不写 SSH 加固配置 |
 | 5 | 读 sshd 实际端口；22/2222 时给随机建议并要求确认/输入目标端口，已是自定义端口则沿用 → `fw_prepare_for_ssh` → `ssh_harden` | 双闸门；闸门一/二任一拒绝即中止且不进入第 6 步；闸门二拒绝时旧端口规则保留 |
 | 6 | jail 未就绪或端口不一致才 `f2b_apply` | 读不到 sshd 端口或 jail 未就绪即中止 |
 | 7 | swap 未启用时询问是否进 Swap 流程（默认跳过） | 跳过则继续 |
@@ -44,7 +46,11 @@
 
 ---
 
-## `1` 系统更新与基础工具
+## `1` 换源说明
+
+只显示 [LinuxMirrors](https://linuxmirrors.cn/main.sh) 来源、风险提示和人工命令。脚本不是本项目提供或维护的工具；本项目不下载、不执行，也未完成其当前在线版本的全量安全审计。标准初始化开始时询问是否换源，Snapshot 确认后由操作者在另一个 root 终端执行；若继续标准流程，应在第三方脚本里跳过软件包升级。
+
+## `2` 系统更新与基础工具
 
 | 项 | 行为 |
 |---|---|
@@ -58,11 +64,15 @@
 
 ---
 
-## `2` 用户、密码、sudo 和密钥
+## `3` 时区
 
-管理员解析顺序：本进程已确定且账号存在 → sshd 有效 `AllowUsers` 中唯一且存在的用户 → 列出 `getent passwd` 里可登录普通用户（UID 1000–59999 且 shell 非 nologin/false）。
+显示当前时区与 NTP 状态。修改时只接受 `timedatectl list-timezones` 中的名称；先用 `backup_file` 备份 `/etc/localtime`，再 `timedatectl set-timezone` 并复查。失败时不自动回滚。该菜单不修改 NTP；标准初始化接受任一有效当前时区并要求 NTP active。
 
-**解析结果必须是已存在账号**（`user_exists` = `id -u`）。默认模式下输入不存在的用户名会被拒绝并重问；只有 `do_standard_init` 第 4 步用 `--allow-new` 放行一个尚未创建的用户名，随后立即 `adduser` 并复查存在性，任一步失败即中止流程。空回车 = 暂不指定，`user_menu` 显示"未指定"且除 `1` 以外的动作全部被 `need_admin` 拒绝。**用户名只存在于本次进程**。
+## `4` 用户、密码、sudo 和密钥
+
+管理员解析顺序：本进程已确定且 UID 非 0 的现存账号 → sshd 有效 `AllowUsers` 中唯一且存在的非 root 用户 → 列出系统现有可登录普通用户（UID 1000–59999 且 shell 非 nologin/false）。root（UID 0）永远不能作为管理员。
+
+**解析结果必须是已存在的非 root 账号**（`user_exists` 且 `id -u` 非 0）。默认模式下输入不存在的用户名会被拒绝；只有 `do_standard_init` 第 4 步用 `--allow-new` 放行新用户名，随后立即创建并复查。若有效 `AllowUsers` 只列 root，新账号在当前策略下不能登录：流程会停止且不会改 SSH 配置，操作者须手动允许新用户并验证后重跑。用户名只存在于本次进程。
 
 > 历史缺陷：早期版本用 `v_user` 格式校验就接受用户名，导致"幽灵账号"——此后 `chpasswd`、`sudo -l`、`authorized_keys` 全部对着不存在的账号执行，`chpasswd` 报 PAM `Authentication token manipulation error`。
 
@@ -79,7 +89,7 @@
 
 ---
 
-## `3` UFW 与 SSH
+## `5` UFW 与 SSH
 
 仓库里**唯一能锁死登录**的菜单。改动必须真机全链路验收：两次闸门 + 新终端登录 + 终检全绿。
 
@@ -107,7 +117,7 @@
 
 ---
 
-## `4` fail2ban
+## `6` fail2ban
 
 | 项 | 行为 |
 |---|---|
@@ -122,7 +132,7 @@
 
 ---
 
-## `5` Swap
+## `7` Swap
 
 独立风格模块：`set -uo pipefail`（无 `-e`）、自有 helper（`swap_ask_option` / `swap_ask_value` / `swap_confirm`，结果写入 `SWAP_ANSWER`）、`trap swap_cleanup EXIT`；在子 shell 中运行，选项与 trap 不外泄。只管理 swap **文件**，不碰分区；不支持 btrfs/ZFS 上的 swap 文件；容器内无法启用 swap。
 
@@ -137,13 +147,13 @@
 
 ---
 
-## `6` BBR
+## `8` BBR
 
 显示当前 `tcp_congestion_control` / `default_qdisc` / 配置文件状态；`1` 写入并应用 `/etc/sysctl.d/99-bbr.conf`（内容一致则跳过写入；`sysctl -p` 部分键失败只警告）；`2` 只读查看。**参数是作者本机特调，必须用户明确选择才应用**；`tcp_congestion_control` 不是 `bbr` 时报错返回 1。
 
 ---
 
-## `7` 终检与报告
+## `9` 终检与报告
 
 只读。全部结论来自当前系统状态，**不从任何缓存推断历史端口或历史选择**。
 
@@ -155,11 +165,12 @@
 
 ---
 
+
 ## 手动步骤（无脚本）
 
 | 步骤 | 内容 |
 |---|---|
 | 上机前 | 查系统、记 SSH 端口、建 Snapshot、生成密钥、国内换源、可选 bench.sh |
-| 时区/NTP | `timedatectl set-timezone Asia/Shanghai` + 确认 NTP active（标准初始化第 3 步只检查，不代改） |
+| 时区/NTP | `timedatectl list-timezones` 中任一有效时区 + 确认 NTP active（标准初始化只检查，不自动修改 NTP） |
 | Docker | 仅提示：linuxmirrors 脚本，**必须选不关闭防火墙** |
 | 收尾 | 核对报告 + 创建最终 Snapshot |

@@ -362,6 +362,12 @@ fw_rule_line() {   # fw_rule_line <编号>：输出该编号规则的文本（�
 user_home() { getent passwd "$1" | cut -d: -f6; }
 user_gid()  { id -g "$1"; }
 user_exists() { id -u "$1" >/dev/null 2>&1; }   # 不打印 id 的报错；账号不存在返回 1
+user_is_nonroot() {   # user_is_nonroot <用户>：管理员账号不得是 UID 0
+  local uid
+  uid="$(id -u "$1" 2>/dev/null)" || return 1
+  [[ "${uid}" =~ ^[0-9]+$ ]] && (( uid > 0 ))
+}
+
 
 human_users() {   # 可登录普通用户（UID 1000..59999 且 shell 可用）
   local u uid shell
@@ -373,7 +379,7 @@ human_users() {   # 可登录普通用户（UID 1000..59999 且 shell 可用）
   done < <(getent passwd)
 }
 
-admin_from_allowusers() {   # 有效 AllowUsers 中「唯一且存在」的用户；否则输出空
+admin_from_allowusers() {   # 有效 AllowUsers 中「唯一且存在的非 root 用户」；否则输出空
   local eff raw tok
   local -a users=()
   eff="$(ssh_eff)"
@@ -386,9 +392,28 @@ admin_from_allowusers() {   # 有效 AllowUsers 中「唯一且存在」的用�
     users+=("${tok}")
   done <<< "${raw}"
   (( ${#users[@]} == 1 )) || return 0
-  id "${users[0]}" >/dev/null 2>&1 || return 0
+  user_is_nonroot "${users[0]}" || return 0
   printf '%s' "${users[0]}"
 }
+
+ssh_root_only_allowusers() {   # 当前有效 AllowUsers 只列 root（可带 @host）
+  local eff
+  eff="$(ssh_eff)"
+  [[ -n "${eff}" ]] || return 1
+  awk '
+    tolower($1)=="allowusers" {
+      found=1
+      for (i=2; i<=NF; i++) {
+        users++
+        user=$i
+        sub(/@.*/, "", user)
+        if (user != "root") other=1
+      }
+    }
+    END { exit !(found && users > 0 && !other) }
+  ' <<<"${eff}"
+}
+
 
 resolve_admin_user() {
   # 无参数：只解析「已存在」的账号；空回车=暂不指定，返回 1
@@ -398,7 +423,9 @@ resolve_admin_user() {
   local u
   local -a cands=()
   if [[ -n "${ADMIN_USER}" ]] && user_exists "${ADMIN_USER}"; then
-    return 0
+    if user_is_nonroot "${ADMIN_USER}"; then return 0; fi
+    warn "root（UID 0）不能作为管理员账号；请选择或创建非 root 用户"
+    ADMIN_USER=""
   fi
   u="$(admin_from_allowusers)"
   if [[ -n "${u}" ]]; then
@@ -433,6 +460,10 @@ resolve_admin_user() {
     fi
     if v_user "${u}" >/dev/null 2>&1; then
       if user_exists "${u}"; then
+        if ! user_is_nonroot "${u}"; then
+          warn "root（UID 0）不能作为管理员账号，请选择或创建非 root 用户"
+          continue
+        fi
         ADMIN_USER="${u}"
         return 0
       fi
@@ -592,6 +623,13 @@ cur_tz() {
   out="$(timedatectl show -p Timezone --value 2>/dev/null)" || true
   printf '%s' "${out:-未知}"
 }
+timezone_valid() {   # timezone_valid <时区>：只接受 timedatectl 声明的时区
+  local zones
+  [[ -n "$1" ]] || return 1
+  zones="$(timedatectl list-timezones 2>/dev/null)" || return 1
+  grep -Fxq -- "$1" <<<"${zones}"
+}
+
 pkg_installed() {
   local st
   st="$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null)" || true
@@ -648,7 +686,7 @@ ui_quit() { printf '  %s0%s) 返回主菜单\n' "${C_R}" "${C_0}"; }
 ui_yes()  { printf '%s%s%s' "${C_G}" "$1" "${C_0}"; }
 ui_no()   { printf '%s%s%s' "${C_Y}" "$1" "${C_0}"; }
 
-# ============ 模块 1：系统更新与基础工具 ============
+# ============ 模块 2：系统更新与基础工具 ============
 install_missing_base() {
   local miss
   miss="$(missing_pkgs ${BASE})"
@@ -787,7 +825,7 @@ base_menu() {
   done
 }
 
-# ============ 模块 2：用户、密码、sudo 和密钥 ============
+# ============ 模块 4：用户、密码、sudo 和密钥 ============
 user_do_password() {
   local op out rc=0
   need_admin || return 1
@@ -1102,7 +1140,7 @@ user_menu() {
   done
 }
 
-# ============ 模块 3：UFW 与 SSH ============
+# ============ 模块 5：UFW 与 SSH ============
 do_scan_dropins() {
   # cloud-init 常见：drop-in 覆盖项。sshd 配置先出现者优先，01- 之前的文件会压过本项目配置
   local f
@@ -1148,6 +1186,10 @@ ssh_harden() {   # ssh_harden <目标端口>：写 drop-in + 双闸门；成功 
   need_admin || return 1
   if ! getent passwd "${ADMIN_USER}" >/dev/null 2>&1; then
     die_action "系统用户 ${ADMIN_USER} 不存在。AllowUsers 写它会让所有账号（含当前会话）下次登录被拒"
+    return 1
+  fi
+  if ! user_is_nonroot "${ADMIN_USER}"; then
+    die_action "SSH 加固必须使用非 root 管理员账号（UID 0 禁止）"
     return 1
   fi
 
@@ -1267,7 +1309,7 @@ ssh_harden() {   # ssh_harden <目标端口>：写 drop-in + 双闸门；成功 
 
 fw_prepare_for_ssh() {   # fw_prepare_for_ssh <当前端口> <目标端口>
   local cur="$1" target="$2" p ports fresh=0
-  command -v ufw >/dev/null 2>&1 || { die_action "未找到 ufw，请先安装基础工具（菜单 1）"; return 1; }
+  command -v ufw >/dev/null 2>&1 || { die_action "未找到 ufw，请先安装基础工具（菜单 2）"; return 1; }
   fw_refresh
   if [[ "$(fw_state)" != "active" ]]; then
     fresh=1
@@ -1295,7 +1337,7 @@ fw_prepare_for_ssh() {   # fw_prepare_for_ssh <当前端口> <目标端口>
       log "已放行业务端口 ${p}/tcp"
     done
   else
-    log "ufw 已启用：不询问业务端口，现有规则保持不变（可在菜单 3 中直接增删）"
+    log "ufw 已启用：不询问业务端口，现有规则保持不变（可在菜单 5 中直接增删）"
   fi
   fw_refresh
   # 铁律：确认目标端口已放行才允许启用防火墙
@@ -1507,10 +1549,10 @@ fw_do_change_port() {
     log "与当前生效端口相同，无需迁移"
     return 0
   fi
-  command -v ufw >/dev/null 2>&1 || { warn "未安装 ufw，先安装基础工具（菜单 1）"; return 0; }
+  command -v ufw >/dev/null 2>&1 || { warn "未安装 ufw，先安装基础工具（菜单 2）"; return 0; }
   fw_refresh
   if [[ "$(fw_state)" != "active" ]]; then
-    warn "ufw 未启用：先在本菜单 1 配置并启用防火墙（铁律：UFW 先于 sshd）"
+    warn "ufw 未启用：先在本菜单配置并启用防火墙（主菜单 5，铁律：UFW 先于 sshd）"
     return 0
   fi
   if ! fw_has_rule "${target}/tcp"; then
@@ -1670,7 +1712,7 @@ fw_menu() {
   done
 }
 
-# ============ 模块 4：fail2ban ============
+# ============ 模块 6：fail2ban ============
 f2b_write_jail() {   # <端口> <bantime> <findtime> <maxretry>；jail 就绪返回 0，否则返回 1
   local port="$1" bantime="$2" findtime="$3" maxretry="$4" jail_ok=0
   backup_file "${JAIL}" >/dev/null || true
@@ -1869,7 +1911,7 @@ f2b_menu() {
   done
 }
 
-# ============ 模块 5：Swap（子 shell 内运行，选项与 trap 不外泄） ============
+# ============ 模块 7：Swap（子 shell 内运行，选项与 trap 不外泄） ============
 # 由来：本段原为独立发布版脚本，保留其自有 helper 与 set -uo pipefail（不启用 -e）；
 # 私有函数/变量统一 swap_ 前缀，由无参数 run_swap_menu 在子 shell 中调用。
 SWAP_FSTAB="/etc/fstab"
@@ -2405,7 +2447,7 @@ run_swap_menu() {
   )
 }
 
-# ============ 模块 6：BBR ============
+# ============ 模块 8：BBR ============
 # 目标配置：BBR + fq + TCP 调优（外部获取的调参集，逐行可审；参数为作者本机特调）
 read -r -d '' BBR_CONTENT <<'EOF' || true
 kernel.pid_max = 65535
@@ -2556,7 +2598,7 @@ bbr_menu() {
   done
 }
 
-# ============ 模块 7：终检与报告 ============
+# ============ 模块 9：终检与报告 ============
 V_RED=0
 V_YEL=0
 V_OK=0
@@ -2719,6 +2761,89 @@ verify_menu() {
     page_wait "按回车返回终检菜单…"
   done
 }
+mirror_instructions() {
+  printf '  第三方来源：SuperManito 的 LinuxMirrors（https://linuxmirrors.cn/main.sh）\n'
+  printf '  本项目不提供或维护该脚本，也未对当前在线版本完成全量安全审计。\n'
+  printf '  只有在你自行审阅并接受以 root 执行第三方代码的风险后才运行。\n'
+  printf '  运行前确认已创建 Snapshot；在另一个 root 终端执行：\n'
+  printf '    bash <(curl -fsSL https://linuxmirrors.cn/main.sh)\n'
+  printf '  若随后继续本流程，在第三方脚本中选择不升级软件包；本流程稍后会处理升级。\n'
+}
+
+mirror_info_menu() {
+  scr_clear
+  ui_rule
+  printf '%s 软件源（第三方脚本）%s\n' "${C_B}" "${C_0}"
+  ui_sep
+  mirror_instructions
+  ui_sep
+  page_wait "按回车返回主菜单…"
+}
+
+timezone_do_set() {
+  local current tz backup_dir
+  current="$(cur_tz)"
+  printf '当前时区：%s\n' "${current}"
+  printf '可用时区列表：timedatectl list-timezones\n'
+  read -rp "输入完整时区名称（回车取消）: " tz || die "输入中断"
+  if [[ -z "${tz}" ]]; then
+    log "已取消时区修改"
+    return 0
+  fi
+  if ! timezone_valid "${tz}"; then
+    die_action "无效时区或无法读取时区列表：${tz}（运行 timedatectl list-timezones 查看）"
+    return 1
+  fi
+  if [[ "${tz}" == "${current}" ]]; then
+    log "时区已是 ${tz}，未修改"
+    return 0
+  fi
+  if ! ask_yesno "确认将时区从 ${current} 改为 ${tz}？" n; then
+    log "已取消时区修改"
+    return 0
+  fi
+  backup_dir="$(backup_file /etc/localtime)" || {
+    die_action "备份 /etc/localtime 失败，未修改时区"
+    return 1
+  }
+  if [[ -z "${backup_dir}" || ( ! -e "${backup_dir}/localtime" && ! -L "${backup_dir}/localtime" ) ]]; then
+    die_action "未能确认 /etc/localtime 备份，未修改时区"
+    return 1
+  fi
+  if ! timedatectl set-timezone "${tz}"; then
+    die_action "timedatectl 设置时区失败；原时区为 ${current}，备份位于 ${backup_dir}"
+    return 1
+  fi
+  current="$(cur_tz)"
+  if [[ "${current}" != "${tz}" ]]; then
+    die_action "时区设置后复查为 ${current}，预期 ${tz}；备份位于 ${backup_dir}"
+    return 1
+  fi
+  log "时区已设置为 ${tz}（复查通过）；原值备份位于 ${backup_dir}"
+}
+
+timezone_menu() {
+  local current
+  while :; do
+    current="$(cur_tz)"
+    scr_clear
+    ui_rule
+    printf '%s 时区%s\n' "${C_B}" "${C_0}"
+    ui_sep
+    ui_kv "当前时区" "${current}"
+    ui_kv "NTP" "$(ntp_active && printf 'active' || printf '未 active')"
+    ui_sep
+    ui_item 1 "修改时区（使用 timedatectl 列表中的名称）"
+    ui_quit
+    ui_sep
+    ask_menu "选择操作" 1
+    case "${UI_REPLY}" in
+      0) return 0 ;;
+      1) act timezone_do_set ;;
+    esac
+    page_wait "按回车返回时区菜单…"
+  done
+}
 
 # ============ 标准初始化（主菜单 0） ============
 step_banner() { printf '\n%s== 步骤 %s · %s ==%s\n' "${C_B}" "$1" "$2" "${C_0}"; }
@@ -2730,7 +2855,7 @@ flow_abort() {   # 中止剩余步骤（不跳过闸门、不做后续写入）
 }
 
 do_standard_init() {
-  local cur target tz
+  local cur target tz change_sources=0
   scr_clear
   ui_rule
   printf '%s 标准初始化%s\n' "${C_B}" "${C_0}"
@@ -2738,6 +2863,10 @@ do_standard_init() {
   printf '  按步骤引导：系统更新 → 时区/NTP → 用户/密钥 → UFW/SSH → fail2ban → Swap → BBR → 终检\n'
   printf '  %s每一步只修改未达标项；任何安全检查失败都会中止剩余步骤。%s\n' "${C_D}" "${C_0}"
   ui_sep
+  if ask_yesno "标准初始化开始前是否换源？只会在 Snapshot 确认后提示你手动运行第三方脚本。" n; then
+    change_sources=1
+  fi
+
 
   # ---- 步骤 1：环境概览 + Snapshot 闸门 ----
   step_banner 1 "环境概览与云平台确认"
@@ -2755,6 +2884,16 @@ do_standard_init() {
   if ! ask_yesno "以上三项都已确认，开始系统修改？" n; then
     return 1
   fi
+  if (( change_sources )); then
+    printf '\n%s== 可选准备步骤 · 手动换源 ==%s\n' "${C_B}" "${C_0}"
+    mirror_instructions
+    scr_pause "请在另一个 root 终端完成后返回此窗口（Ctrl-C 中止）…"
+    if ! ask_yesno "换源已完成，且第三方脚本未升级软件包？" n; then
+      flow_abort "未确认换源完成，未继续系统更新"
+      return 1
+    fi
+  fi
+
 
   # ---- 步骤 2：系统更新与基础工具 ----
   step_banner 2 "系统更新与基础工具"
@@ -2765,25 +2904,28 @@ do_standard_init() {
   ua_enable || { flow_abort "自动安全更新启用失败，未继续后续步骤"; return 1; }
   maybe_reboot
 
-  # ---- 步骤 3：时区与 NTP（手动步骤，只检查不代改） ----
+  # ---- 步骤 3：时区与 NTP ----
   step_banner 3 "时区与 NTP"
   tz="$(cur_tz)"
   printf '  当前时区： %s\n' "${tz}"
-  if ntp_active; then printf '  NTP： %s\n' "$(ui_yes 'active ✓')"; else printf '  NTP： %s\n' "$(ui_no '未激活 ⚠')"; fi
-  if [[ "${tz}" != "Asia/Shanghai" ]] || ! ntp_active; then
-    warn "时区或 NTP 未达标。本程序不改这两项系统设置，请手动执行："
-    printf '    timedatectl set-timezone Asia/Shanghai\n'
-    printf '    timedatectl                      # 确认 NTP service: active\n'
+  if ! timezone_valid "${tz}"; then
+    flow_abort "当前时区无效或无法读取；请回主菜单 3 设置有效时区后重跑"
+    return 1
+  fi
+  if ntp_active; then
+    printf '  NTP： %s\n' "$(ui_yes 'active ✓')"
+    log "有效时区与 NTP 已满足"
+  else
+    printf '  NTP： %s\n' "$(ui_no '未激活 ⚠')"
+    warn "本程序不修改 NTP。请在另一个终端处理并检查 timedatectl；时区菜单只修改时区。"
     scr_pause "完成后按回车重新检测（Ctrl-C 中止）…"
-    tz="$(cur_tz)"
-    if [[ "${tz}" != "Asia/Shanghai" ]] || ! ntp_active; then
-      flow_abort "时区仍为 ${tz} 或 NTP 仍未 active，未继续后续步骤"
+    if ! ntp_active; then
+      flow_abort "NTP 仍未 active，未继续后续步骤"
       return 1
     fi
-    log "时区与 NTP 已达标"
-  else
-    log "时区与 NTP 已满足"
+    log "有效时区与 NTP 已达标"
   fi
+
 
   # ---- 步骤 4：管理员账号、密码、sudo、公钥 ----
   step_banner 4 "管理员账号与密钥"
@@ -2847,11 +2989,22 @@ do_standard_init() {
   else
     log "authorized_keys 已有 $(ak_count) 把公钥（已满足）"
   fi
+  if ssh_root_only_allowusers; then
+    flow_abort "sshd 有效 AllowUsers 仅允许 root；当前策略阻止 ${ADMIN_USER} 登录，未进行 SSH 加固"
+    printf '  请先确保非 root 用户 %s 在现有 AllowUsers 规则中获准登录，保留当前 root 会话，验证该用户的密钥登录后再重跑。\n' "${ADMIN_USER}"
+    return 1
+  fi
+  cur="$(sshd_port)"
+  if [[ -z "${cur}" ]]; then
+    flow_abort "无法读取当前 SSH 端口，未继续管理员登录验证"
+    return 1
+  fi
   printf '\n'
-  printf '  %s闸门：%s请新开一个终端执行 ssh %s@<host>，确认密钥登录成功且 sudo -v 通过。\n' \
-    "${C_Y}" "${C_0}" "${ADMIN_USER}"
-  if ! ask_yesno "已在新终端用密钥登录该账号并通过 sudo -v？" n; then
-    flow_abort "未确认密钥登录可用，未继续 UFW/SSH 加固"
+  printf '  %s闸门：%s保持当前 root 会话开启；在新终端执行：\n' "${C_Y}" "${C_0}"
+  printf '    ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no -p %s %s@<host>\n' "${cur}" "${ADMIN_USER}"
+  printf '  密钥认证成功后，在新终端执行 sudo -v；命令退出码为 0 才通过。密码提示属于 sudo，不是 SSH 登录密码回退。\n'
+  if ! ask_yesno "已用上述命令通过密钥登录，并以 sudo -v 验证 sudo？" n; then
+    flow_abort "未确认密钥登录与 sudo 均可用，未继续 UFW/SSH 加固"
     return 1
   fi
 
@@ -2912,7 +3065,7 @@ do_standard_init() {
 
   # ---- 步骤 9：自动更新复核 + Docker 提示 + 终检 ----
   step_banner 9 "自动更新复核、Docker 提示与终检"
-  if ua_enabled; then log "自动安全更新：已启用（已满足）"; else warn "自动安全更新未启用：可回主菜单 1 启用"; fi
+  if ua_enabled; then log "自动安全更新：已启用（已满足）"; else warn "自动安全更新未启用：可回主菜单 2 启用"; fi
   printf '\n'
   printf '  %sDocker（仅提示，本程序不安装）：%s\n' "${C_D}" "${C_0}"
   printf '    bash <(curl -fsSL https://linuxmirrors.cn/docker.sh)\n'
@@ -2922,7 +3075,7 @@ do_standard_init() {
   if run_verify; then
     log "标准初始化完成"
   else
-    warn "终检存在红灯：按报告逐项修复后可在主菜单 7 重跑终检"
+    warn "终检存在红灯：按报告逐项修复后可在主菜单 9 重跑终检"
   fi
   printf '\n'
   printf '  %s最后一步：到云平台核对安全组，并创建最终 Snapshot。%s\n' "${C_Y}" "${C_0}"
@@ -2963,13 +3116,15 @@ draw_main_menu() {
   ui_kv "自动更新" "$(ua_state)"
   ui_sep
   ui_item 0 "标准初始化（按顺序引导全流程）"
-  ui_item 1 "系统更新与基础工具"
-  ui_item 2 "用户、密码、sudo 和密钥"
-  ui_item 3 "UFW 与 SSH"
-  ui_item 4 "fail2ban"
-  ui_item 5 "Swap"
-  ui_item 6 "BBR"
-  ui_item 7 "终检与报告"
+  ui_item 1 "换源（第三方脚本说明；不自动执行）"
+  ui_item 2 "系统更新与基础工具"
+  ui_item 3 "时区"
+  ui_item 4 "用户、密码、sudo 和密钥"
+  ui_item 5 "UFW 与 SSH"
+  ui_item 6 "fail2ban"
+  ui_item 7 "Swap"
+  ui_item 8 "BBR"
+  ui_item 9 "终检与报告"
   printf '  %sq%s) 退出\n' "${C_R}" "${C_0}"
   ui_sep
 }
@@ -2977,11 +3132,11 @@ draw_main_menu() {
 ask_main() {
   local input
   while :; do
-    read -rp "选择 [0-7]（q 退出）: " input || die "输入中断"
+    read -rp "选择 [0-9]（q 退出）: " input || die "输入中断"
     case "${input}" in
       q|Q) MAIN_REPLY="q"; return 0 ;;
-      0|1|2|3|4|5|6|7) MAIN_REPLY="${input}"; return 0 ;;
-      *) warn "无效输入：请输入 0-7，或 q 退出" ;;
+      0|1|2|3|4|5|6|7|8|9) MAIN_REPLY="${input}"; return 0 ;;
+      *) warn "无效输入：请输入 0-9，或 q 退出" ;;
     esac
   done
 }
@@ -2999,13 +3154,15 @@ main() {
         act do_standard_init || true
         page_wait "按回车返回主菜单…"
         ;;
-      1) act base_menu ;;
-      2) act user_menu ;;
-      3) act fw_menu ;;
-      4) act f2b_menu ;;
-      5) scr_clear; act run_swap_menu || true ;;
-      6) act bbr_menu ;;
-      7) act verify_menu ;;
+      1) act mirror_info_menu ;;
+      2) act base_menu ;;
+      3) act timezone_menu ;;
+      4) act user_menu ;;
+      5) act fw_menu ;;
+      6) act f2b_menu ;;
+      7) scr_clear; act run_swap_menu || true ;;
+      8) act bbr_menu ;;
+      9) act verify_menu ;;
     esac
   done
   printf '\n%s再见。%s\n' "${C_D}" "${C_0}"
