@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# VPS 初始化 · 00 单入口 TUI
+# 1804 VPS Setup · 00 单入口 TUI
 # 自包含 + 原生状态 + 交互闸门。用法：sudo -i 后 bash <(curl -fsSL .../00-tui.sh)
 # 启动即进入主菜单：只做环境前置检查与状态探测，不安装软件、不初始化系统、不写文件。
 # 状态一律读系统原生来源（sshd -T / ss -tlnp / ufw / authorized_keys / fail2ban-client /
 # /proc/swaps / sysctl / 20auto-upgrades），不保存项目私有运行态。
-# 项目：https://raw.githubusercontent.com/Pathto1804/myVPS/main/00-tui.sh
+# 项目：https://raw.githubusercontent.com/Pathto1804/1804-vps-setup/main/00-tui.sh
 
 set -euo pipefail
 # 命令替换默认不继承 errexit：不开这个，$(ask_input ...) 里的 die 只终止子 shell，
@@ -428,9 +428,61 @@ ssh_root_only_allowusers() {   # 当前有效 AllowUsers 只列 root（可带 @h
 }
 
 
+select_admin_user() {
+  local allow_new=0 u new_u
+  [[ "${1-}" == "--allow-new" ]] && allow_new=1
+  local -a cands=()
+  mapfile -t cands < <(human_users | LC_ALL=C sort)
+  printf '系统现有可登录用户：\n'
+  printf '  0) 创建新用户\n'
+  if (( ${#cands[@]} > 0 )); then
+    local i=1 c
+    for c in "${cands[@]}"; do
+      printf '  %d) %s\n' "${i}" "${c}"
+      i=$((i + 1))
+    done
+  else
+    printf '  （无）\n'
+  fi
+  while :; do
+    read -rp "管理员用户（输入编号）（回车=取消）: " u || die "输入中断"
+    [[ -n "${u}" ]] || return 1
+    if [[ "${u}" =~ ^[0-9]+$ ]]; then
+      if (( u == 0 )); then
+        if (( ! allow_new )); then
+          warn "当前场景不允许创建新用户"
+          continue
+        fi
+        while :; do
+          read -rp "新用户名（必填）: " new_u || die "输入中断"
+          if ! v_user "${new_u}" >/dev/null 2>&1; then
+            warn "用户名不合法，请重新输入"
+            continue
+          fi
+          if user_exists "${new_u}"; then
+            warn "用户 ${new_u} 已存在，请从上面的已有用户列表选择"
+            break
+          fi
+          ADMIN_USER="${new_u}"
+          log "账号 ${new_u} 尚不存在：稍后按提示创建"
+          return 0
+        done
+        continue
+      fi
+      if (( ${#cands[@]} > 0 )) && (( u >= 1 && u <= ${#cands[@]} )); then
+        ADMIN_USER="${cands[u - 1]}"
+        return 0
+      fi
+      warn "无效编号：请输入 0-${#cands[@]}"
+      continue
+    fi
+    warn "无效输入：请输入用户编号"
+  done
+}
+
 resolve_admin_user() {
   # 无参数：只解析「已存在」的账号；空回车=暂不指定，返回 1
-  # --allow-new：允许留一个尚不存在的合法用户名（仅标准初始化第 4 步用，随后会创建）
+  # --allow-new：菜单 4 与标准初始化第 4 步允许选择一个尚不存在的合法用户名
   local allow_new=0
   [[ "${1-}" == "--allow-new" ]] && allow_new=1
   local u
@@ -440,13 +492,18 @@ resolve_admin_user() {
     warn "root（UID 0）不能作为管理员账号；请选择或创建非 root 用户"
     ADMIN_USER=""
   fi
+  if (( allow_new )); then
+    select_admin_user --allow-new
+    return $?
+  fi
+
   u="$(admin_from_allowusers)"
   if [[ -n "${u}" ]]; then
     ADMIN_USER="${u}"
     log "从 sshd 有效 AllowUsers 取到管理员账号：${ADMIN_USER}"
     return 0
   fi
-  mapfile -t cands < <(human_users)
+  mapfile -t cands < <(human_users | LC_ALL=C sort)
   printf '系统现有可登录用户：\n'
   if (( ${#cands[@]} > 0 )); then
     local i=1 c
@@ -478,11 +535,6 @@ resolve_admin_user() {
           continue
         fi
         ADMIN_USER="${u}"
-        return 0
-      fi
-      if (( allow_new )); then
-        ADMIN_USER="${u}"
-        log "账号 ${u} 尚不存在：稍后按提示创建"
         return 0
       fi
       warn "用户 ${u} 不存在：请在本菜单选 1 创建，或重新输入已有用户名"
@@ -707,6 +759,11 @@ install_missing_base() {
     log "必要包已全部安装（已满足）"
     return 0
   fi
+  printf '缺少必要包：%s\n' "${miss}"
+  if ! ask_yesno "确认安装以上必要包？" n; then
+    log "已取消安装必要包"
+    return 1
+  fi
   log "安装缺失包：${miss}"
   if ! DEBIAN_FRONTEND=noninteractive apt-get install -y ${miss}; then
     die_action "安装失败：${miss}（检查网络/源后重试）"
@@ -714,6 +771,7 @@ install_missing_base() {
   fi
   return 0
 }
+
 
 ua_enable() {
   if ua_enabled; then
@@ -1027,43 +1085,28 @@ user_do_key_del() {
 }
 
 user_do_switch() {
-  local u
-  local -a cands=()
-  mapfile -t cands < <(human_users)
-  printf '系统现有可登录用户：\n'
-  if (( ${#cands[@]} > 0 )); then
-    local i=1 c
-    for c in "${cands[@]}"; do printf '  %d) %s\n' "${i}" "${c}"; i=$((i + 1)); done
-  else
-    printf '  （无）\n'
-  fi
-  while :; do
-    read -rp "目标用户名（编号或用户名）（回车=取消）: " u || die "输入中断"
-    [[ -z "${u}" ]] && return 0
-    if [[ "${u}" =~ ^[0-9]+$ ]]; then
-      if (( ${#cands[@]} > 0 )) && (( u >= 1 && u <= ${#cands[@]} )); then
-        u="${cands[u - 1]}"
-        break
-      fi
-      warn "无效编号：请输入 1-${#cands[@]}，或用户名"
-      continue
-    fi
-    if v_user "${u}" >/dev/null 2>&1; then break; fi
-    warn "无效输入：请输入 1-${#cands[@]} 的编号，或合法用户名"
-  done
+  local u previous="${ADMIN_USER}"
+  select_admin_user --allow-new || return 0
+  u="${ADMIN_USER}"
   if user_exists "${u}"; then
     log "用户 ${u} 已存在，切换为管理目标"
   else
-    if ! ask_yesno "用户 ${u} 不存在，创建并加入 sudo 组？" y; then return 0; fi
+    if ! ask_yesno "用户 ${u} 不存在，创建并加入 sudo 组？" y; then
+      ADMIN_USER="${previous}"
+      return 0
+    fi
     if ! adduser --gecos "" "${u}"; then
+      ADMIN_USER="${previous}"
       die_action "创建用户 ${u} 失败（见上方 adduser 输出）"
       return 1
     fi
     if ! user_exists "${u}"; then
+      ADMIN_USER="${previous}"
       die_action "adduser 返回成功但 ${u} 仍不存在，未切换管理目标"
       return 1
     fi
     if ! usermod -aG sudo "${u}"; then
+      ADMIN_USER="${previous}"
       die_action "用户 ${u} 已创建，但加入 sudo 组失败；请手动 usermod -aG sudo ${u}"
       return 1
     fi
@@ -1072,6 +1115,7 @@ user_do_switch() {
   ADMIN_USER="${u}"
   return 0
 }
+
 
 user_do_show_keys() {
   local ak
@@ -1095,7 +1139,7 @@ user_do_show_keys() {
 
 user_menu() {
   local pw sudo_st keys
-  resolve_admin_user || true
+  user_do_switch || true
   while :; do
     if [[ -n "${ADMIN_USER}" ]] && user_exists "${ADMIN_USER}"; then
       pw="$(pw_state "${ADMIN_USER}")"
@@ -2628,7 +2672,7 @@ run_verify() {
   local actual pwd_auth root_login jail_raw j_port cc disk_usage
   V_RED=0; V_YEL=0; V_OK=0; V_LINES=()
 
-  log "VPS 初始化终检"
+  log "1804 VPS Setup 终检"
   printf '\n'
 
   # ---- sshd 实际生效值 ----
@@ -2708,7 +2752,7 @@ run_verify() {
   date_str="$(date '+%Y-%m-%d %H:%M:%S')"
   os_name="$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2)" || true
   {
-    printf '# VPS 初始化终检报告\n\n'
+    printf '# 1804 VPS Setup 终检报告\n\n'
     printf -- '- 主机： %s\n' "${hostn}"
     printf -- '- 时间： %s\n' "${date_str}"
     printf -- '- 发行版： %s\n' "${os_name:-未知}"
@@ -2797,17 +2841,33 @@ mirror_info_menu() {
 }
 
 timezone_do_set() {
-  local current tz backup_dir
+  local current tz backup_dir choice label
+  local -a zones=(
+    "Asia/Shanghai"
+    "UTC"
+    "Asia/Tokyo"
+    "Asia/Singapore"
+    "Europe/London"
+    "America/New_York"
+  )
   current="$(cur_tz)"
   printf '当前时区：%s\n' "${current}"
-  printf '可用时区列表：timedatectl list-timezones\n'
-  read -rp "输入完整时区名称（回车=取消）: " tz || die "输入中断"
-  if [[ -z "${tz}" ]]; then
+  printf '常用时区：\n'
+  local i
+  for i in "${!zones[@]}"; do
+    label="${zones[i]}"
+    (( i == 0 )) && label+="（推荐）"
+    printf '  %d) %s\n' "$((i + 1))" "${label}"
+  done
+  ask_menu "选择时区" "${#zones[@]}" "取消"
+  choice="${UI_REPLY}"
+  if [[ "${choice}" == "0" ]]; then
     log "已取消时区修改"
     return 0
   fi
+  tz="${zones[$((choice - 1))]}"
   if ! timezone_valid "${tz}"; then
-    die_action "无效时区或无法读取时区列表：${tz}（运行 timedatectl list-timezones 查看）"
+    die_action "系统不支持所选时区：${tz}"
     return 1
   fi
   if [[ "${tz}" == "${current}" ]]; then
@@ -2838,6 +2898,7 @@ timezone_do_set() {
   log "时区已设置为 ${tz}（复查通过）；原值备份位于 ${backup_dir}"
 }
 
+
 timezone_menu() {
   local current
   while :; do
@@ -2849,7 +2910,7 @@ timezone_menu() {
     ui_kv "当前时区" "${current}"
     ui_kv "NTP" "$(ntp_active && printf 'active' || printf '未 active')"
     ui_sep
-    ui_item 1 "修改时区（使用 timedatectl 列表中的名称）"
+    ui_item 1 "修改时区（从常用时区中选择）"
     ui_quit
     ui_sep
     ask_menu "选择操作" 1
@@ -3120,7 +3181,7 @@ draw_main_menu() {
   fw_refresh
   scr_clear
   ui_rule
-  printf '%s VPS 初始化 TUI%s %s（原生状态，无项目私有配置文件）%s\n' "${C_B}" "${C_0}" "${C_D}" "${C_0}"
+  printf '%s 1804 VPS Setup TUI%s %s（原生状态，无项目私有配置文件）%s\n' "${C_B}" "${C_0}" "${C_D}" "${C_0}"
   ui_sep
   if [[ -n "${sshp}" ]]; then ui_kv "SSH 端口" "${sshp}"; else ui_kv "SSH 端口" "$(ui_no '未知（sshd -T 失败）')"; fi
   case "$(fw_state)" in

@@ -1,4 +1,4 @@
-# VPS 初始化手动教程
+# 1804 VPS Setup: 手动教程
 
 不用任何脚本，一条一条敲命令，把 VPS 初始化完整做一遍。适合想搞清楚每条命令在干什么的人；跑过一遍之后再看 README 的脚本，每个步骤为什么那么设计就都明白了。
 
@@ -85,7 +85,7 @@ apt install -y sudo ca-certificates curl wget gnupg ufw fail2ban \
   bind9-dnsutils jq tmux lsof rsync zip
 ```
 
-一条装齐（必要项 + 常用实用工具）。其中 `needrestart` 补上自动更新后重启受影响服务这一环（缺它则 libc/openssl 补丁装了不生效）——装完之后在有终端的 apt 里（含第 11 步的 docker 一键脚本）会多问一句要重启哪些服务，答 `i` 立即重启、`l` 只看清单；`ncdu`/`mtr-tiny`/`bind9-dnsutils` 是磁盘、链路、DNS 三件套。tcpdump/strace/sysstat 等有提权面或需额外启用的诊断类仍不预装，用到再装。需要 Debian 12 / 13（验收基线 Debian 12；Debian 11 与 Ubuntu 20.04+ 理论可用但未验证——更老的系统没有 `bind9-dnsutils`）。
+一条装齐（必要项 + 常用实用工具）。脚本菜单 `2` 和标准初始化第 2 步发现必要包缺失时，会先显示缺失列表并确认；回答否不安装，标准初始化会停止后续步骤。其中 `needrestart` 补上“自动更新后重启受影响服务”这一环（缺它则 libc/openssl 补丁装了不生效）——装完之后在有终端的 apt 里（含第 11 步的 docker 一键脚本）会多问一句要重启哪些服务，答 `i` 立即重启、`l` 只看清单；`ncdu`/`mtr-tiny`/`bind9-dnsutils` 是磁盘、链路、DNS 三件套。tcpdump/strace/sysstat 等有提权面或需额外启用的诊断类仍不预装，用到再装。需要 Debian 12 / 13（验收基线 Debian 12；Debian 11 与 Ubuntu 20.04+ 理论可用但未验证——更老的系统没有 `bind9-dnsutils`）。
 
 ## 3. 系统基础配置
 
@@ -95,9 +95,10 @@ timedatectl list-timezones                      # 查看有效时区名称
 timedatectl set-timezone <时区>                 # 例如 Asia/Shanghai
 ```
 
-标准流程接受系统提供的任一有效时区，仍要求 NTP service 为 active；脚本不自动修改 NTP。主菜单 `3` 可交互修改时区并复查设置结果。
+手动教程仍可使用 `timedatectl set-timezone <时区>` 输入完整名称；脚本主菜单 `3` 不再要求输入完整时区，只提供 `Asia/Shanghai（推荐）`、`UTC`、`Asia/Tokyo`、`Asia/Singapore`、`Europe/London`、`America/New_York` 六个选项。两条路径都要求 NTP service 为 active，脚本不自动修改 NTP。
 
 ## 4. 创建管理员用户 + 公钥
+脚本版进入菜单 `4` 或标准初始化第 4 步时，会先列出 UID 1000–59999 且 shell 可登录的现有用户，按字典序排列；`0` 固定为创建新用户，已有用户从 `1` 开始。选择 `0` 后再输入用户名并确认创建。
 
 ```bash
 adduser <用户名>                             # 交互设置密码

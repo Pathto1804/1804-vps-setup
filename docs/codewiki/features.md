@@ -33,9 +33,9 @@
 | 步 | 动作 | 停点 |
 |---|---|---|
 | 1 | 一开始询问是否换源；显示环境与当前 SSH 端口 | 必须确认初始 Snapshot、安全组端口、密钥；换源选择只在 Snapshot 确认后转为人工步骤，拒绝 Snapshot 即中止且不改系统 |
-| 2 | `apt-get update`；`apt-get -s full-upgrade` 有事务才 `full-upgrade -y`；补齐 `BASE`；选装可选工具；`ua_enable`；`maybe_reboot` | 需要重启时询问，选重启即结束本次流程 |
-| 3 | 检查当前时区与 NTP | 时区须是 `timedatectl list-timezones` 返回的有效值，接受任一有效时区；NTP 未 active 时暂停复检，仍未 active 即中止；不自动改 NTP |
-| 4 | 解析非 root 管理员（`--allow-new`）→ `adduser` + 复查存在性 + 加入 sudo 组 → 密码 / sudo 免密 → 公钥 | 必须在新终端强制公钥登录并通过 `sudo -v`；有效 `AllowUsers` 仅允许 root 时停止，不写 SSH 加固配置 |
+| 2 | `apt-get update`；`apt-get -s full-upgrade` 有事务才 `full-upgrade -y`；补齐 `BASE`（安装前确认）；选装可选工具；`ua_enable`；`maybe_reboot` | 需要重启时询问，选重启即结束；拒绝安装必要包则中止后续步骤 |
+| 3 | 检查当前时区与 NTP | 时区须是 `timedatectl list-timezones` 返回的有效值；菜单 `3` 修改时只提供固定常用选项并将 `Asia/Shanghai` 标为推荐；NTP 未 active 时暂停复检，仍未 active 即中止；不自动改 NTP |
+| 4 | 固定选择器列出可登录用户（`0` 创建新用户，已有用户按字典序从 `1` 开始）→ `adduser` + 复查存在性 + 加入 sudo 组 → 密码 / sudo 免密 → 公钥 | 必须在新终端强制公钥登录并通过 `sudo -v`；有效 `AllowUsers` 仅允许 root 时停止，不写 SSH 加固配置 |
 | 5 | 读 sshd 实际端口；22/2222 时给随机建议并要求确认/输入目标端口，已是自定义端口则沿用 → `fw_prepare_for_ssh` → `ssh_harden` | 双闸门；闸门一/二任一拒绝即中止且不进入第 6 步；闸门二拒绝时旧端口规则保留 |
 | 6 | jail 未就绪或端口不一致才 `f2b_apply` | 读不到 sshd 端口或 jail 未就绪即中止 |
 | 7 | swap 未启用时按内存定档（≤2048MB → 2048，否则 4096）自动创建 `/swapfile` 并设 `vm.swappiness=10`（`run_swap_auto`） | 一次确认；btrfs/ZFS、OpenVZ/LXC、`/swapfile` 已存在但 fstab 无条目、空间不足等情况说明原因后跳过并继续 |
@@ -55,7 +55,7 @@
 | 项 | 行为 |
 |---|---|
 | `1` 刷新索引并升级系统 | `apt-get update`（失败即中止动作）→ `apt_pending_count` 为 0 则只提示"已是最新"→ 否则 `full-upgrade -y` → `maybe_reboot` |
-| `2` 补齐必要包 | `missing_pkgs ${BASE}`，为空则"已满足"，否则只装缺的 |
+| `2` 补齐必要包 | `missing_pkgs ${BASE}`，为空则"已满足"；有缺失时先显示缺失列表并确认，回答否不安装；确认后只装缺的 |
 | `3` 选择并安装可选工具 | 回车取 `TOOLS_EXTRA_DEFAULT`（`jq tmux lsof rsync zip`），`none` 不装；只装缺的 |
 | `4` 启用自动安全更新 | `20auto-upgrades` 两行已为 `"1"` 则跳过写入；否则先备份再写；`systemctl enable --now apt-daily.timer apt-daily-upgrade.timer` |
 
@@ -66,19 +66,21 @@
 
 ## `3` 时区
 
-显示当前时区与 NTP 状态。修改时只接受 `timedatectl list-timezones` 中的名称；先用 `backup_file` 备份 `/etc/localtime`，再 `timedatectl set-timezone` 并复查。失败时不自动回滚。该菜单不修改 NTP；标准初始化接受任一有效当前时区并要求 NTP active。
+显示当前时区与 NTP 状态。修改时只提供 `Asia/Shanghai（推荐）`、`UTC`、`Asia/Tokyo`、`Asia/Singapore`、`Europe/London`、`America/New_York` 六个选项；选择后先用 `backup_file` 备份 `/etc/localtime`，再 `timedatectl set-timezone` 并复查。失败时不自动回滚。该菜单不修改 NTP；标准初始化接受任一有效当前时区并要求 NTP active。
 
 ## `4` 用户、密码、sudo 和密钥
 
-管理员解析顺序：本进程已确定且 UID 非 0 的现存账号 → sshd 有效 `AllowUsers` 中唯一且存在的非 root 用户 → 列出系统现有可登录普通用户（UID 1000–59999 且 shell 非 nologin/false）。root（UID 0）永远不能作为管理员。
+管理员选择器只接受已存在的非 root 可登录用户，或固定的创建新用户入口。可登录普通用户来源为 UID 1000–59999 且 shell 非 nologin/false；显示时按字典序排列。
 
-**解析结果必须是已存在的非 root 账号**（`user_exists` 且 `id -u` 非 0）。默认模式下输入不存在的用户名会被拒绝；只有 `do_standard_init` 第 4 步用 `--allow-new` 放行新用户名，随后立即创建并复查。若有效 `AllowUsers` 只列 root，新账号在当前策略下不能登录：流程会停止且不会改 SSH 配置，操作者须手动允许新用户并验证后重跑。用户名只存在于本次进程。
+进入菜单 `4` 和选择菜单 `4 → 1` 时，`0` 永远表示创建新用户，已有用户从 `1` 开始编号。选择 `0` 后再输入用户名，脚本先确认，再执行 `adduser`、复查 `user_exists` 并加入 sudo 组；不接受直接输入任意用户名作为选择。这个选择只存在于本次进程。
 
-> 历史缺陷：早期版本用 `v_user` 格式校验就接受用户名，导致"幽灵账号"——此后 `chpasswd`、`sudo -l`、`authorized_keys` 全部对着不存在的账号执行，`chpasswd` 报 PAM `Authentication token manipulation error`。
+标准初始化第 4 步复用同一选择器。若有效 `AllowUsers` 只列 root，新账号在当前策略下不能登录：流程会停止且不会改 SSH 配置，操作者须手动允许新用户并验证后重跑。
+
+> 历史缺陷：早期版本用 `v_user` 格式校验就接受用户名，导致“幽灵账号”——此后 `chpasswd`、`sudo -l`、`authorized_keys` 全部对着不存在的账号执行，`chpasswd` 报 PAM `Authentication token manipulation error`。
 
 | 项 | 行为 | 写什么 |
 |---|---|---|
-| `1` 切换 / 新建管理员 | 列候选 → 选择；不存在则 `adduser` + 复查 `user_exists` + `usermod -aG sudo`，任一步失败则 `die_action` 且不切换管理目标 | 系统账户 |
+| `1` 切换 / 新建管理员 | 列出排序后的用户；`0` 创建新用户；选择已有用户直接切换；创建时 `adduser` + 复查 `user_exists` + `usermod -aG sudo`，任一步失败则 `die_action` 且恢复原管理目标 | 系统账户 |
 | `2` 设置或修改密码 | 转发 `passwd`，或生成 22 位随机密码（只显示一次，`unset` 后不留存）；两条路径写完后都复查 `passwd -S` 为 `P`，失败时原文回显 `chpasswd`/`passwd` 的 stderr | 系统密码 |
 | `3` sudo 免密 开/关 | 用 `sudo -l -U` 的有效权限判断当前状态；`unknown` 直接拒绝切换。开启写 `/etc/sudoers.d/<用户>` 并 `visudo -c`，失败即删文件。关闭**只删本项目管理的那个文件**，删后重查；若仍 NOPASSWD 则明确报告"其他规则仍放行" | `/etc/sudoers.d/<用户>` |
 | `4` 追加公钥 | 逐行粘贴，空行结束；逐行过 `v_pubkey`，非法行跳过；读现有文件后追加 | `authorized_keys` |
