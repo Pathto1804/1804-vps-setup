@@ -46,10 +46,12 @@ PORT=8188
 CPU_MODE=0
 ACCESS_MODE=""
 PY_VER="3.13"
+CONDA_ENV_NAME="comfyui"
 CUSTOM_TARGET_SET=0
 DRIVER_CHANGED=0
 TMPD=""
 UI_REPLY=""
+MAIN_REPLY=""
 DW=0
 declare -a COMFY_ARGS=()
 declare -a COMFY_EXTRA_ARGS=()
@@ -125,17 +127,18 @@ require_root() { [[ "${EUID}" -eq 0 ]] || die "需要 root 运行，请用：sud
 require_tty() { [[ -t 0 ]] || die "需要交互终端运行，不支持无人值守"; }
 require_x86_64() { [[ "$(uname -m)" == "x86_64" ]] || die "仅支持 x86_64，当前：$(uname -m)"; }
 
-distro_id() { awk -F= '/^ID=/{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null; }
-distro_version() { awk -F= '/^VERSION_ID=/{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null; }
-distro_pretty() { awk -F= '/^PRETTY_NAME=/{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null; }
+distro_id() { awk -F= '/^ID=/{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null || true; }
+distro_version() { awk -F= '/^VERSION_ID=/{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null || true; }
+distro_pretty() { awk -F= '/^PRETTY_NAME=/{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null || true; }
 distro_major() { local v; v="$(distro_version)"; printf '%s' "${v%%.*}"; }
 
 require_distro() {
   local id major
   id="$(distro_id)"; major="$(distro_major)"
+  [[ "${major}" =~ ^[0-9]+$ ]] || major=0
   case "${id}" in
-    ubuntu) (( ${major:-0} >= 20 )) || die "需要 Ubuntu 20.04+，当前：$(distro_version)" ;;
-    debian) (( ${major:-0} >= 11 )) || die "需要 Debian 11+，当前：$(distro_version)" ;;
+    ubuntu) (( 10#${major} >= 20 )) || die "需要 Ubuntu 20.04+，当前：$(distro_version)" ;;
+    debian) (( 10#${major} >= 11 )) || die "需要 Debian 11+，当前：$(distro_version)" ;;
     *) die "仅支持 Debian/Ubuntu，当前：${id:-未知}" ;;
   esac
 }
@@ -183,8 +186,8 @@ ask_menu() {
   while :; do
     read -rp "${prompt} [0-${max}]（回车=${zero}）: " input || die "输入中断"
     input="${input:-0}"
-    if [[ "${input}" =~ ^[0-9]+$ ]] && (( input <= max )); then
-      UI_REPLY="${input}"; return 0
+    if [[ "${input}" =~ ^[0-9]+$ ]] && (( 10#${input} <= max )); then
+      UI_REPLY="$((10#${input}))"; return 0
     fi
     warn "无效输入：请输入 0-${max}"
   done
@@ -792,9 +795,9 @@ driver_install_path_a() {
   fi
   out="$(ubuntu-drivers devices 2>/dev/null || true)"
   printf '%s\n' "${out}"
-  branches="$(sed -n 's/.*nvidia-driver-\([0-9][0-9]*\).*/\1/p' <<< "${out}" | sort -nu)"
+  branches="$(sed -n 's/.*nvidia-driver-\([0-9][0-9]*\).*/\1/p' <<< "${out}" | sort -nu || true)"
   max="$(tail -n 1 <<< "${branches}")"
-  if [[ -z "${max}" ]] || (( max < 580 )); then
+  if [[ -z "${max}" ]] || (( 10#${max} < 580 )); then
     warn "系统源最高驱动：${max:-未知}（低于 580），改走 NVIDIA 官方源"
     driver_install_path_b || return 1
     return 0
@@ -846,7 +849,7 @@ driver_install_path_b() {
     2) pkg="cuda-drivers" ;;
     3)
       branch="$(ask_input_def "输入驱动大版本号（>=580）" v_driver_branch "580")" || return 1
-      if (( branch < 580 )); then
+      if (( 10#${branch} < 580 )); then
         die_action "v1 要求驱动 >=580，拒绝安装 ${branch}"
         return 1
       fi
@@ -936,9 +939,12 @@ detect_or_install_driver() {
     if gpu_driver_ready; then
       cv="$(gpu_cuda_version)"
       major="$(cuda_major "${cv}")"
-      if [[ -n "${major}" ]] && (( major >= 13 )); then
-        log "GPU：$(gpu_name)；驱动 $(gpu_driver_version) [$(driver_flavor_label)]；CUDA ${cv}（满足）"
-        if systemd_present && ask_yesno "驱动已满足要求，是否检查并升级到更新的稳定版本？" n; then
+      if [[ "${major}" =~ ^[0-9]+$ ]] && (( 10#${major} >= 13 )); then
+        log "GPU：$(gpu_name)；驱动 $(gpu_driver_version) [$(driver_flavor_label)]；CUDA ${cv}"
+        log "说明：当前满足最低要求（>=580 / CUDA 13.0+），是否已是最新稳定版需与软件源对比"
+        if ! systemd_present; then
+          log "当前为非 systemd 环境（疑似容器实例），驱动由宿主机提供，跳过容器内驱动升级"
+        elif ask_yesno "是否联网检查软件源，对比当前驱动与最新稳定版并按需升级？" n; then
           driver_install_action || return 1
           if (( DRIVER_CHANGED )); then
             return 2
@@ -1022,12 +1028,22 @@ conda_init_bash() {
 }
 
 miniforge_install() {
-  local installer
+  local installer target_dir="${MINIFORGE_DIR}" want_new_miniforge=0
   if miniforge_ok; then
-    log "Miniforge/conda 已安装（已满足）：$("${CONDA_BIN}" --version 2>/dev/null || true)"
-    conda_init_bash
-    condarc_write || return 1
-    return 0
+    if [[ "${MINIFORGE_DIR}" == "${ROOT_HOME}/miniforge3" ]]; then
+      log "Miniforge 已安装（已满足）：$("${CONDA_BIN}" --version 2>/dev/null || true)"
+      conda_init_bash
+      condarc_write || return 1
+      return 0
+    fi
+    warn "检测到系统已有其他 conda：${CONDA_BIN}（$("${CONDA_BIN}" --version 2>/dev/null || true)）"
+    if ask_yesno "直接复用已有 conda（选 n 则另行安装 Miniforge 到 ${ROOT_HOME}/miniforge3）？" y; then
+      conda_init_bash
+      condarc_write || return 1
+      return 0
+    fi
+    target_dir="${ROOT_HOME}/miniforge3"
+    want_new_miniforge=1
   fi
   installer="${TMPD}/miniforge.sh"
   log "下载 Miniforge（清华镜像）"
@@ -1046,14 +1062,23 @@ miniforge_install() {
     die_action "Miniforge 安装包为空"
     return 1
   fi
-  if ! bash "${installer}" -b -u -p "${MINIFORGE_DIR}"; then
+  if ! bash "${installer}" -b -u -p "${target_dir}"; then
     die_action "Miniforge 安装失败"
     return 1
   fi
   rm -f "${installer}"
-  if ! miniforge_ok; then
+  if [[ ! -x "${target_dir}/bin/conda" ]] || ! "${target_dir}/bin/conda" --version >/dev/null 2>&1; then
     die_action "Miniforge 安装后不可用"
     return 1
+  fi
+  MINIFORGE_DIR="${target_dir}"
+  CONDA_BIN="${MINIFORGE_DIR}/bin/conda"
+  MAMBA_BIN="${MINIFORGE_DIR}/bin/mamba"
+  ENV_DIR="${MINIFORGE_DIR}/envs/${CONDA_ENV_NAME}"
+  ENV_PY="${ENV_DIR}/bin/python"
+  sync_env_bin
+  if (( want_new_miniforge )); then
+    CUSTOM_TARGET_SET=1
   fi
   conda_init_bash
   condarc_write || return 1
@@ -1152,8 +1177,8 @@ select_python_target() {
   fi
   printf '  可直接输入候选编号，或输入任意 python 可执行文件完整路径\n'
   custom="$(ask_input "选择编号或输入 Python 路径" v_nonempty)" || return 1
-  if [[ "${custom}" =~ ^[0-9]+$ ]] && (( custom >= 1 && custom <= ${#cand_list[@]} )); then
-    custom="${cand_list[$((custom-1))]}"
+  if [[ "${custom}" =~ ^[0-9]+$ ]] && (( 10#${custom} >= 1 && 10#${custom} <= ${#cand_list[@]} )); then
+    custom="${cand_list[$((10#${custom}-1))]}"
   fi
   if ! v_pybin "${custom}"; then
     die_action "Python 路径无效：${custom}"
@@ -1185,8 +1210,8 @@ select_comfy_target() {
   fi
   printf '  可输入候选编号，或输入任意包含 main.py 的 ComfyUI 目录路径\n'
   custom="$(ask_input "选择编号或输入 ComfyUI 目录" v_nonempty)" || return 1
-  if [[ "${custom}" =~ ^[0-9]+$ ]] && (( custom >= 1 && custom <= ${#cand_list[@]} )); then
-    custom="${cand_list[$((custom-1))]}"
+  if [[ "${custom}" =~ ^[0-9]+$ ]] && (( 10#${custom} >= 1 && 10#${custom} <= ${#cand_list[@]} )); then
+    custom="${cand_list[$((10#${custom}-1))]}"
   fi
   if ! v_comfy_dir "${custom}"; then
     die_action "目录无效（缺少 main.py）：${custom}"
@@ -1388,7 +1413,7 @@ torch_install() {
       return 1
     fi
   fi
-  out="$(torch_report)"
+  out="$(torch_report || true)"
   if [[ -z "${out}" ]]; then
     die_action "PyTorch 安装后 import 失败"
     return 1
@@ -1753,7 +1778,7 @@ verify_all() {
   else
     if gpu_driver_ready; then
       cv="$(gpu_cuda_version)"; major="$(cuda_major "${cv}")"
-      if [[ -n "${major}" ]] && (( major >= 13 )); then
+      if [[ "${major}" =~ ^[0-9]+$ ]] && (( 10#${major} >= 13 )); then
         check_ok "GPU $(gpu_name)；驱动 $(gpu_driver_version)；CUDA ${cv}"
       else
         check_fail "GPU CUDA ${cv:-未知} < 13.0（驱动 <580）"
@@ -1774,7 +1799,7 @@ verify_all() {
 
   if env_ok; then
     local mgr_ver
-    out="$(torch_report)"
+    out="$(torch_report || true)"
     if [[ -n "${out}" ]]; then
       parse_torch_report "${out}"
       if (( CPU_MODE )); then
@@ -2267,7 +2292,7 @@ model_dirs_show() {
   for d in "${MODEL_DIRS[@]}"; do
     base="${COMFY_DIR}/models/${d}"
     mkdir -p "${base}" || { die_action "创建 ${base} 失败"; return 1; }
-    printf '%-20s %s\n' "${d}" "$(du -sh "${base}" 2>/dev/null | awk '{print $1}')"
+    printf '%-20s %s\n' "${d}" "$(du -sh "${base}" 2>/dev/null | awk '{print $1}' || true)"
   done
   return 0
 }
@@ -2621,7 +2646,7 @@ verify_menu() {
 
 cache_clean() {
   local size pip_cmd=""
-  size="$(du -sh "${ROOT_HOME}/.cache/pip" 2>/dev/null | awk '{print $1}')"
+  size="$(du -sh "${ROOT_HOME}/.cache/pip" 2>/dev/null | awk '{print $1}' || true)"
   printf 'pip 缓存：%s\n' "${size:-未知}"
   if ask_yesno "清理 pip 缓存？" n; then
     if env_ok; then

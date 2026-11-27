@@ -30,8 +30,8 @@
 |---|---|---|
 | 1 | 预检：root/TTY/x86_64/Ubuntu-Debian、Snapshot 确认、磁盘 >=10GB（<30GB 警告）、清华/阿里镜像连通 | 拒绝 Snapshot、磁盘 <10GB、镜像确认拒绝即中止 |
 | 2 | 安装必要基础包前询问是否先更换系统 apt 源（LinuxMirrors：展示免责声明与命令，确认风险后可执行或跳过），然后 `apt-get update` + 安装 `COMFY_BASE` | 换源失败且拒绝继续、未执行换源且拒绝继续、用户拒绝安装或 apt 失败即中止 |
-| 3 | 检测 NVIDIA 硬件与驱动 | 驱动 CUDA <13.0 或不可用：安装/升级驱动后**停止流程等重启**；已满足 >=580 时默认回车跳过，也可选择检查并升级到最新稳定版；拒绝安装不足驱动则中止；无 GPU 可进 CPU 测试模式 |
-| 4 | 安装 Miniforge（清华，GitHub 兜底；支持 `wget`/`curl` 自动回退）、写 `.condarc` 清华源、`conda init` | 下载/安装失败即中止 |
+| 3 | 检测 NVIDIA 硬件与驱动 | 驱动 CUDA <13.0 或不可用：安装/升级驱动后**停止流程等重启**；已满足 >=580 时明确说明仅满足最低要求（容器环境提示由宿主机提供；systemd 主机可选联网对比软件源并升级到最新稳定版）；拒绝安装不足驱动则中止；无 GPU 可进 CPU 测试模式 |
+| 4 | 安装 Miniforge（清华，GitHub 兜底；支持 `wget`/`curl` 自动回退；若检测到非 Miniforge 的其他 conda 如 Miniconda 则询问直接复用或另装 Miniforge）、写 `.condarc` 清华源、`conda init` | 下载/安装失败即中止 |
 | 5 | 创建 `comfyui` 环境（Python 3.13） | 创建失败即中止 |
 | 6 | clone/pull ComfyUI（GitHub；失败可问 ghproxy；非 Git 且含 `main.py` 目录跳过 pull 并保留） | clone 失败即中止；pull 冲突只警告并继续 |
 | 7 | pip 阿里源；装 `torch torchvision`（GPU 用阿里 PyPI；CPU 用官方 CPU 索引）；装 requirements（`manager_requirements.txt` 存在才装） | 安装失败或 CUDA 主版本 !=13 即中止 |
