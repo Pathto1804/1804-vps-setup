@@ -1,6 +1,7 @@
 # 0003 — 单入口 TUI 与原生系统状态
 
 - 状态：已接受（2026-11-16）
+- 扩展：[0004](0004-comfyui-entry.md)（2026-11-27）新增 ComfyUI 第二入口；本 ADR 的「单入口」与「Debian 一等」约束限定基础初始化脚本 `00-tui.sh`，不适用于 `comfyui-tui.sh`。
 - 取代：[0001](0001-no-orchestrator.md)（无编排器）、[0002](0002-script-consolidation.md)（脚本合并与步骤号前缀）
 - 关联：[docs/codewiki/architecture.md](../codewiki/architecture.md)、[docs/codewiki/terms.md](../codewiki/terms.md)（交互契约 / 原生状态 / 标准初始化）
 

@@ -5,7 +5,8 @@
 无构建、无测试框架、无 CI。本地验证手段只有三条：
 
 ```bash
-bash -n 00-tui.sh && shellcheck -S warning 00-tui.sh   # 改完必须双绿
+bash -n 00-tui.sh && shellcheck -S warning 00-tui.sh   # 基础脚本
+bash -n comfyui-tui.sh && shellcheck -S warning comfyui-tui.sh
 bash tools/sync_check.sh                               # 必须输出「一致性 OK」
 # 真机验收：Snapshot 保护的 VPS 上走全流程（改标准初始化或 UFW/SSH 行为时必须）
 ```
@@ -16,7 +17,7 @@ bash tools/sync_check.sh                               # 必须输出「一致�
 
 | 改动 | 必须做的 |
 |---|---|
-| 任何代码改动 | `bash -n` + `shellcheck -S warning` + `sync_check` |
+| 任何代码改动 | 对应脚本 `bash -n` + `shellcheck -S warning` + `sync_check` |
 | 增加/删除 `BASE` 或 `TOOLS_EXTRA_DEFAULT` 项 | 同步 `README.md` 与 `docs/tutorial.md` 的清单 → `sync_check` 会比对 |
 | 改主菜单编号、子菜单项 | 同步 `README.md`、`docs/codewiki/features.md`、`docs/tutorial.md` 的对应引用 |
 | 改 `ssh_harden` / `ufw_precheck` / 闸门 | 必须真机全链路：两次闸门 + 新终端密钥登录 + 终检全绿 |
@@ -24,6 +25,7 @@ bash tools/sync_check.sh                               # 必须输出「一致�
 | 改状态来源（新增/替换探测命令） | 同步 `architecture.md` 的状态来源表 |
 | 重新引入任何项目私有状态文件 | 不允许。`sync_check` 会拦截 `/root/.vps-init.conf` 引用；要改这条约束先写 ADR |
 | 新架构决策 | 新建 `docs/adr/000N-*.md`，把被取代的旧 ADR 状态改为「已被 ADR-000N 取代」，再回填 `architecture.md` 结论段 |
+| 改 ComfyUI 脚本 | 同步 `comfyui-docs/codewiki/features.md`/`architecture.md`、根 README、`comfyui-docs/README.md`；验收见 `comfyui-docs/codewiki/development.md` |
 
 ## 编码约定
 
@@ -39,7 +41,7 @@ bash tools/sync_check.sh                               # 必须输出「一致�
 
 ## 工作区规范
 
-- 根目录只放入口脚本 `00-tui.sh`、`README.md`、仓库配置（`.gitignore`/`.gitattributes`）；其余进 `docs/`、`tools/`、`.omp/`。
+- 根目录放入口脚本 `00-tui.sh`、`comfyui-tui.sh`、`README.md`、`AGENTS.md`、仓库配置（`.gitignore`/`.gitattributes`）；其余进 `docs/`、`comfyui-docs/`、`tools/`、`.omp/`。
 - 脚手架（测试脚本、打桩环境、调试输出、提交草稿、中间产物）放 `.scratch/`（已 gitignore），交付前清空。
 - 不往工作区外写文件；不删用户已有文件；不擅自提交、推送（推送前必须征得用户确认）。
 - 交付时 `git status -sb` 应与 `origin/main` 同步，无未跟踪文件。
@@ -77,6 +79,8 @@ bash tools/sync_check.sh                               # 必须输出「一致�
 | 2026-11-12 | `CONTEXT.md` 退役，知识迁入 `docs/codewiki/` | 单一知识入口 |
 | 2026-11-15 | y/n 提示统一为 `[y/n]（回车=是/否）`（删掉 `swap_confirm`，输入大小写都认）；提示后缀统一为四种口径；首次启用 ufw 改问 80/443 + 额外端口；标准初始化第 7 步改自动创建 swap；BBR 段改只读并移除内置参数集 | 交互显示与输入行为收敛到 `ask_yesno`；脚本不再写 `/etc/sysctl.d/99-bbr.conf` |
 | 2026-11-16 | 七个步骤脚本合并为单入口 `00-tui.sh`；删除私有 conf，状态改读原生来源；新增主菜单 `0` 标准初始化；`sync_check` 收缩为入口/关键行/包清单/私有状态四项 | ADR-0001、ADR-0002 被 ADR-0003 取代；失去历史旧端口自动推断 |
+| 2026-11-27 | 新增 ComfyUI 第二入口 `comfyui-tui.sh`、`comfyui-docs/` 双文档树与 ADR-0004；`sync_check` 扩展为双入口 | 基础脚本的单入口与 Debian 一等约束限定 `00-tui.sh`；仓库新增第二入口 |
+
 
 ## 文档职责
 
@@ -84,6 +88,7 @@ bash tools/sync_check.sh                               # 必须输出「一致�
 |---|---|---|
 | `README.md` | 使用者 | 入口命令、主菜单、各功能菜单、检查点 |
 | `docs/tutorial.md` | 想理解每条命令的人 | 手动等价做法 |
-| `docs/codewiki/*` | 维护者 | 业务边界、架构、功能、开发流程、术语 |
+| `docs/codewiki/*` | 维护者 | 基础脚本的业务边界、架构、功能、开发流程、术语 |
+| `comfyui-docs/*` | 维护者 | ComfyUI 入口的业务边界、架构、功能、开发流程、专属术语 |
 | `docs/adr/*` | 维护者 | 决策与已否方案 |
-| `.omp/AGENTS.md` | AI 代理 | 操作约束与硬规则（不含知识正文） |
+| `AGENTS.md` | AI 代理 | 操作约束与硬规则（不含知识正文） |

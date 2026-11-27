@@ -3,18 +3,19 @@
 ## 仓库布局
 
 ```
-/                     唯一入口脚本 00-tui.sh + README.md + 仓库配置
-docs/adr/             决策记录（0001/0002 已被 0003 取代，0003 为现行决策）
-docs/codewiki/        本目录：长期维护知识
-docs/tutorial.md      手动等价教程（脚本改了它要跟）
-tools/sync_check.sh   单入口一致性自检（唯一自动化检查）
+/                     两个入口：00-tui.sh + comfyui-tui.sh；README.md；AGENTS.md；仓库配置
+docs/adr/             决策记录（0004 新增 ComfyUI 入口；0003 为基础上位决策）
+docs/codewiki/        基础脚本知识（本目录）
+docs/tutorial.md      基础脚本手动等价教程
+comfyui-docs/         ComfyUI 脚本知识（README + 两份指南 + codewiki/）
+tools/sync_check.sh   双入口一致性自检
 ```
 
-根目录只允许放入口脚本 `00-tui.sh`、`README.md` 和仓库配置；其余一律进 `docs/`、`tools/`、`.omp/`。
+根目录允许放入口脚本 `00-tui.sh`、`comfyui-tui.sh`、`README.md`、`AGENTS.md` 和仓库配置；其余进 `docs/`、`comfyui-docs/`、`tools/`、`.omp/`。
 
 ## 核心机制：单文件 + 原生状态
 
-`00-tui.sh` 是**唯一的可执行脚本**，单文件 raw 拉取即可运行：不 `source` 仓库内任何文件，所需函数全部内联。启动只做三件事——环境前置检查（root / TTY / Debian 系）、状态探测、绘制主菜单；**不装软件、不初始化系统、不写文件**。
+`00-tui.sh` 与 `comfyui-tui.sh` 是**两个并列的用户入口**，各自单文件 raw 拉取即可运行：不 `source` 仓库内任何文件，所需函数全部内联。启动只做三件事——环境前置检查（root / TTY / 发行版）、状态探测、绘制主菜单；**不装软件、不初始化系统、不写文件**。`comfyui-tui.sh` 的机制见 [`comfyui-docs/codewiki/architecture.md`](../../comfyui-docs/codewiki/architecture.md)。
 
 ```mermaid
 graph TD
@@ -106,7 +107,7 @@ graph TD
   2. 菜单 7：fstab 修改后 `findmnt --verify` 失败且修改前基线正常时，从备份自动恢复。
 - **锁死预案**：云控制台/VNC → 还原备份 → `systemctl reload ssh`；最终防线是上机前的 Snapshot。
 
-## 交互形态：单入口 TUI
+## 基础脚本的交互形态：单入口 TUI
 
 - 主菜单顶部是实时状态，每次绘制前重新读取。
 - 主菜单：`0`–`9` 选功能、`q` 退出；空输入原地重问（**不会**映射成 `0`）；非法输入原地重问。
@@ -116,11 +117,11 @@ graph TD
 
 ## 自动化检查的边界
 
-`tools/sync_check.sh` 检查四类，且**只检查这四类**：
+`tools/sync_check.sh` 检查以下结构项，且**只检查结构项**：
 
-1. 入口脚本 `00-tui.sh` 存在，且已退役的步骤脚本没有复活
-2. 关键行存在性：`shopt -s inherit_errexit`
-3. 包清单：`00-tui.sh` 的 `BASE` / `TOOLS_EXTRA_DEFAULT` 与 README、`docs/tutorial.md` 逐项相同
-4. 脚本里不得引用 `/root/.vps-init.conf`（防止私有状态被重新引入）
+1. 两个入口 `00-tui.sh`、`comfyui-tui.sh` 存在；已退役的步骤脚本与根目录其他 `NN-*.sh` 不得复活
+2. 关键行存在性：两个脚本都有 `shopt -s inherit_errexit`
+3. 包清单：`00-tui.sh` 的 `BASE` / `TOOLS_EXTRA_DEFAULT` 与 README、`docs/tutorial.md` 逐项相同；`comfyui-tui.sh` 的 `COMFY_BASE` 与 README 的 ComfyUI 包清单相同
+4. 两个脚本都不得引用 `/root/.vps-init.conf` 或 `/root/.comfyui-tui.conf`（防止私有状态被重新引入）
 
 检查不到的：语法、ShellCheck、行为正确性、文档与脚本语义是否一致、锁死链路是否被破坏。这些靠人工（见 [development.md](development.md)）。

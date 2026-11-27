@@ -1,0 +1,67 @@
+# 架构
+
+## 单文件入口
+
+`comfyui-tui.sh` 是**第二个用户入口**，与 `00-tui.sh` 并列，不 `source` 仓库内任何文件。UI 原语、备份、探测函数全部内联；与基础脚本约 200 行重复是 raw 单文件形态的代价，不做共享库。
+
+启动只做环境前置检查（root / TTY / x86_64 / Debian 系）、状态探测和主菜单绘制；**不装软件、不写文件**。所有写操作必须由用户在子菜单显式选择，或走菜单 `0` 标准部署。
+
+```mermaid
+graph TD
+  M[comfyui-tui 主菜单] -->|0| F[标准部署]
+  M -->|1-9| S[单项状态页/子菜单]
+  F --> P[预检/快照/磁盘/镜像]
+  P --> B[基础包]
+  B --> D{GPU?}
+  D -->|有| DR[驱动 >=580]
+  DR -->|装完需重启| R[停止流程]
+  DR -->|达标| E[Miniforge + env]
+  D -->|无| CPU[CPU 测试模式]
+  E --> C[ComfyUI + PyTorch + deps]
+  CPU --> C
+  C --> A[listen 0.0.0.0:8188]
+  A --> U[UFW active 时放行 8188]
+  U --> V[systemd 或 /start.d]
+  V --> T[冒烟 + 终检]
+```
+
+## 状态来源：原生系统，不落盘
+
+| 关心的东西 | 权威来源 |
+|---|---|
+| GPU / 驱动 / CUDA | `lspci`、`/dev/nvidia*`、`nvidia-smi`（名称、driver_version、CUDA Version） |
+| 磁盘 | `df -Pk /root` |
+| Miniforge | `~/miniforge3/bin/conda --version` |
+| Python 环境 | `~/miniforge3/envs/comfyui/bin/python --version` |
+| ComfyUI | `~/ComfyUI/.git` + `git rev-parse` / `git branch` |
+| PyTorch | 环境内 `pip show torch` + `import torch`（终检才 import） |
+| 服务 | `/etc/systemd/system/comfyui.service` + `systemctl is-active/is-enabled`；或 `/start.d/comfyui.sh` |
+| 访问方式 | unit/start.d 的 `ExecStart` 是否含 `--listen` |
+| 端口 | `ss -tln`（先取全量再匹配，避免 SIGPIPE） |
+| 防火墙 | `ufw status` |
+| 公网 IP | 终检 `curl` 依次请求 `api.ipify.org` / `ifconfig.me` / `ipinfo.io/ip`；失败打印占位 |
+
+**没有项目私有状态文件**：不写 `comfyui.conf`、不写进度标记。用户输入（CPU/GPU、访问方式）只存在于本次进程；访问方式一旦写入 unit/start.d，下次从文件读回。
+
+## 运行时写入落点
+
+| 路径 | 写入者 | 删除后 |
+|---|---|---|
+| `/etc/systemd/system/comfyui.service` | 菜单 8 / 标准部署 | systemd 不再管理服务 |
+| `/start.d/comfyui.sh` | 菜单 8（容器平台） | 平台不再自启 |
+| `/root/miniforge3/` | 菜单 4 / 标准部署 | Python 环境丢失 |
+| `/root/ComfyUI/` | 菜单 5 / 标准部署 | 代码与 `models/` 丢失 |
+| `/root/.condarc`、`/root/.config/pip/pip.conf` | 菜单 2/4/5 | 回退默认源 |
+| `/root/.bashrc` | Miniforge `conda init`、cuda-toolkit PATH | shell 找不到 conda/nvcc |
+| `/root/vps-init-backups/<时间戳>/` | 所有写配置前 | 失去人工回滚副本 |
+| `/tmp/comfyui-tui.XXXXXX/` | 驱动 keyring、Miniforge 安装包 | 无影响（EXIT 清理） |
+
+## 访问方式
+
+- **listen（默认）**：unit/start.d 写 `--listen 0.0.0.0 --port 8188`。UFW active 时默认流程问一次并 `ufw allow 8188/tcp`；UFW inactive 时不启用，只提示云安全组。
+- **tunnel（后备）**：菜单 7 移除 `--listen` 并重启，只监听回环；本地 `ssh -N -L 8188:127.0.0.1:8188 root@<IP>`。适合恢复 Manager 界面装插件。
+- 两种方式都不改变 ComfyUI 的鉴权能力；公网暴露风险由用户承担。
+
+## 自动检查的边界
+
+`tools/sync_check.sh` 检查：两个入口存在、旧步骤脚本不复活、两个脚本都有 `shopt -s inherit_errexit`、不得引用私有状态文件、`COMFY_BASE` 与根 README 的 ComfyUI 包清单一致。它检查不到语法、ShellCheck、行为正确性与锁死链路；这些靠人工和真机验收。

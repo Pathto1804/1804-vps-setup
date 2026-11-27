@@ -1,6 +1,6 @@
 # CodeWiki
 
-本仓库的长期知识库。`README.md` 回答“怎么快速使用”，`docs/guide.md` 回答“完整使用说明”，`docs/tutorial.md` 回答“手动怎么做”；这里有五份文档回答“为什么这样做、怎么改”。
+本仓库的长期知识库。`README.md` 回答“怎么快速使用”，`docs/guide.md` 回答“完整使用说明”，`docs/tutorial.md` 回答“手动怎么做”；这里为基础脚本 `00-tui.sh` 回答“为什么这样做、怎么改”。ComfyUI 入口 `comfyui-tui.sh` 的知识在 [`comfyui-docs/codewiki/`](../../comfyui-docs/codewiki/README.md)。
 
 | 文档 | 负责的问题 | 什么时候必须改 |
 |---|---|---|
@@ -18,15 +18,16 @@
 4. **本目录不记录会话过程、临时调试结论、待办清单。** 未落地的想法写进 ADR 的"被否的替代方案"或直接丢掉。
 5. **不复制易漂移的清单。** 包清单的权威位置是 `00-tui.sh` 的 `BASE` / `TOOLS_EXTRA_DEFAULT` 与 `README.md`，这里只链接并说明规则；`tools/sync_check.sh` 会核对。
 6. **修改本目录不需要跑 `sync_check`**，但改了脚本后跑它是硬性要求（见 [development.md](development.md)）。
+7. **两套 CodeWiki 分工**：共享概念只在 `docs/codewiki/terms.md` 定义；ComfyUI 专属概念写在 `comfyui-docs/codewiki/terms.md`，不重复定义共享术语。
 
-以上规则在 `.omp/AGENTS.md`「CodeWiki 维护原则」中作为对 AI 代理的硬约束重复声明；两处不一致时以 `.omp/AGENTS.md` 为准，并立即修正本页。
+以上规则在 `AGENTS.md`「CodeWiki 维护原则」中作为对 AI 代理的硬约束重复声明；两处不一致时以 `AGENTS.md` 为准，并立即修正本页。
 
 ## 快照
 
 | 项 | 值 |
 |---|---|
-| 脚本数 | 1（`00-tui.sh`，唯一 raw 入口） |
-| 代码量 | 约 2800 行 bash |
-| 平台 | Debian 12/13 一等；Debian 11、Ubuntu 20.04+ 兼容未逐版本验证 |
-| 决策记录 | [ADR-0003](../adr/0003-single-tui-native-state.md)（现行）；[ADR-0001](../adr/0001-no-orchestrator.md)、[ADR-0002](../adr/0002-script-consolidation.md) 已被取代 |
+| 脚本数 | 2（`00-tui.sh` 基础；`comfyui-tui.sh` ComfyUI） |
+| 代码量 | 基础约 3260 行 bash；ComfyUI 约 2000 行 |
+| 平台 | 基础：Debian 12/13 一等；ComfyUI：Ubuntu 22.04/24.04 一等，Debian 12/13 兼容未逐版本验证 |
+| 决策记录 | [ADR-0003](../adr/0003-single-tui-native-state.md)（基础）；[ADR-0004](../adr/0004-comfyui-entry.md)（第二入口）；ADR-0001/0002 已被 0003 取代 |
 | 自动检查 | `tools/sync_check.sh`；无 CI、无测试框架 |

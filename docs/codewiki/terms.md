@@ -1,9 +1,13 @@
 # 术语表
 
-本仓库的领域语言。措辞以本页为准；其他文档与 `.omp/AGENTS.md` 使用这些词时不再另行定义。
+本仓库的领域语言。措辞以本页为准；其他文档与 `AGENTS.md` 使用这些词时不再另行定义。
+
+**ComfyUI 部署脚本**（`comfyui-tui.sh`）
+与基础初始化脚本并列的第二入口，单文件自包含，负责 GPU/CPU 环境、Miniforge、ComfyUI、PyTorch、模型目录、访问方式与自启；不负责 SSH/UFW 安全基线。专属术语见 [`comfyui-docs/codewiki/terms.md`](../../comfyui-docs/codewiki/terms.md)。
+_Avoid_: 原脚本、新脚本、增强版
 
 **单入口脚本**（`00-tui.sh`）
-唯一可执行脚本，单文件即可被 raw 拉取并独立运行：不 `source` 仓库内其他文件，所需函数全部内联。所有功能（更新、用户、UFW/SSH、fail2ban、Swap、BBR、终检）都在其中，不再有步骤脚本或转发壳。
+基础初始化入口脚本，单文件即可被 raw 拉取并独立运行：不 `source` 仓库内其他文件，所需函数全部内联。所有基础功能（更新、用户、UFW/SSH、fail2ban、Swap、BBR、终检）都在其中，不再有步骤脚本或转发壳。ComfyUI 入口是并列的 `comfyui-tui.sh`，不是本词的扩展。
 _Avoid_: 编排器、主控脚本、模块化脚本
 
 **TUI（主菜单）**
