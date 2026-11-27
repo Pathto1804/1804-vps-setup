@@ -35,9 +35,9 @@ graph TD
 | Python 环境 | 已存在 unit/`start.d` 的 `ExecStart`、conda `comfyui`/`comfy` 环境、`COMFY_DIR/venv`、或本次进程手动切换的 `ENV_PY` |
 | ComfyUI | 已存在 unit/`start.d` 的工作目录、`~/ComfyUI`、常见数据盘目录（含 `main.py` 或 `.git`），或本次进程手动切换的 `COMFY_DIR` |
 | PyTorch | 当前 `ENV_PY` 内 `pip show torch` + `import torch`（终检才 import） |
-| 服务 | `/etc/systemd/system/comfyui.service` + `systemctl is-active/is-enabled`；或 `/start.d/comfyui.sh` |
+| 服务 | `/etc/systemd/system/comfyui.service` + `systemctl is-active/is-enabled`（先判 `/run/systemd/system` 再回退 `ps -p 1`）；或 `/start.d/comfyui.sh` |
 | 访问方式 | unit/start.d 的 `ExecStart` 是否含 `--listen` |
-| 端口 | `ss -tln`（先取全量再匹配，避免 SIGPIPE） |
+| 端口 | `ss -tln` 优先；缺失或为空时回退 `/proc/net/tcp`、`/proc/net/tcp6` |
 | 防火墙 | `ufw status` |
 | 公网 IP | 终检 `curl` 依次请求 `api.ipify.org` / `ifconfig.me` / `ipinfo.io/ip`；失败打印占位 |
 
@@ -48,7 +48,7 @@ graph TD
 | 路径 | 写入者 | 删除后 |
 |---|---|---|
 | `/etc/systemd/system/comfyui.service` | 菜单 8 / 标准部署 | systemd 不再管理服务 |
-| `/start.d/comfyui.sh` | 菜单 8（容器平台） | 平台不再自启 |
+| `/start.d/comfyui.sh`、`/start.d/log/comfyui.log` | 菜单 8 / 标准部署（容器平台） | 平台不再自启 / 无后台日志 |
 | `/root/miniforge3/` | 菜单 4 / 标准部署 | Python 环境丢失 |
 | `/root/ComfyUI/` | 菜单 5 / 标准部署 | 代码与 `models/` 丢失 |
 | `/root/.condarc`、`/root/.config/pip/pip.conf` | 菜单 2/4/5 | 回退默认源 |

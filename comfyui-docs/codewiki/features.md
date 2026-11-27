@@ -35,10 +35,10 @@
 | 5 | 创建 `comfyui` 环境（Python 3.13） | 创建失败即中止 |
 | 6 | clone/pull ComfyUI（GitHub；失败可问 ghproxy；非 Git 且含 `main.py` 目录跳过 pull 并保留） | clone 失败即中止；pull 冲突只警告并继续 |
 | 7 | pip 阿里源；装 `torch torchvision`（GPU 用阿里 PyPI；CPU 用官方 CPU 索引）；装 requirements（`manager_requirements.txt` 存在才装） | 安装失败或 CUDA 主版本 !=13 即中止 |
-| 8 | `main.py --quick-test-for-ci --enable-manager [--cpu]` | 非零即中止 |
-| 9 | 访问方式固定 `listen`；UFW active 时问一次并放行 8188 | 拒绝放行只警告，流程继续 |
-| 10 | 写 systemd unit 或 `/start.d`，启用并等待 HTTP 60 秒 | 写 unit/启用失败即中止；无 systemd 且无 `/start.d` 只警告 |
-| 11 | 终检（红/黄/绿），打印公网 URL 与隧道命令 | 红项只警告，不自动回滚 |
+| 8 | `main.py --quick-test-for-ci [--enable-manager] [--cpu]`（检测到 `comfyui_manager` 才加 `--enable-manager`） | 非零即中止 |
+| 9 | 访问方式固定 `listen`；UFW active 时问一次并放行 8188；systemd 主机缺 UFW 时可选按需安装并预写 8188 规则（不自动启用），容器跳过 UFW | 拒绝放行只警告，流程继续 |
+| 10 | 写 systemd unit 或 `/start.d`，启用/后台拉起并等待 HTTP 60 秒 | 写 unit/启用失败即中止；无 systemd 且无 `/start.d` 只警告 |
+| 11 | 终检（红/黄/绿；容器缺 UFW / 无自启机制只警告不报红），打印公网 URL 与隧道命令 | 红项只警告，不自动回滚 |
 
 ## `1` 环境与依赖检查
 
@@ -77,12 +77,12 @@ clone/pull（非 Git 但含 `main.py` 目录保留代码）、配 pip 阿里源�
 
 ## `7` 远程访问与防火墙
 
-查看当前访问方式、公网 URL、SSH 隧道命令、UFW；设置为 listen（默认，UFW active 时问一次放行 8188）或 tunnel（移除 `--listen`，重启）；**仅检查/放行 UFW 8188 端口（不改自启服务）**；重启服务。未配自启服务时设置访问方式不报错中断，只按需更新防火墙并提示手动参数。
+查看当前访问方式、公网 URL、SSH 隧道命令、UFW；设置为 listen（默认，UFW active 时问一次放行 8188；systemd 主机缺 UFW 时可选按需安装并预写 8188 规则而不自动启用）或 tunnel（移除 `--listen`，重启）；**仅检查/放行 UFW 8188 端口（不改自启服务）**；重启服务（同时支持 systemd 与 `/start.d` 后台进程）。未配自启服务时设置访问方式不报错中断，只按需更新防火墙并提示手动参数。
 
 ## `8` 开机自启
 
-查看 systemd/`/start.d` 状态与当前目标路径；写/更新自启（包含 `main.py` 与当前访问方式，并保留已有 unit/start.d 中的自定义启动参数）；单独写 systemd 服务或 `/start.d` 脚本；启动/停止/重启/状态；切换 CPU/GPU 启动参数；删除自启（先备份，再 disable + rm）。
+查看 systemd/`/start.d` 状态与当前目标路径；写/更新自启（包含 `main.py`、按需 `--enable-manager` 与当前访问方式，并保留已有 unit/start.d 中的自定义启动参数）；单独写 systemd 服务或 `/start.d` 脚本；启动/停止/重启/状态（systemd 或 `/start.d` 后台进程）；切换 CPU/GPU 启动参数；删除自启（先备份，再 disable + rm）。
 
 ## `9` 终检与维护
 
-完整终检（GPU、Conda、env、ComfyUI、torch、manager、服务、端口、HTTP、UFW）；更新 ComfyUI + 依赖 + 重启；清理 pip/conda/journal 缓存（逐项确认，不强依赖脚本安装 Miniforge）；查看 journald 或 `/start.d/log`。
+完整终检（GPU、Conda、env、ComfyUI、torch、manager、服务、端口、`ss` 缺失时回退 `/proc/net/tcp`、HTTP、UFW）；更新 ComfyUI + 依赖 + 重启；清理 pip/conda/journal 缓存（逐项确认，不强依赖脚本安装 Miniforge）；查看 journald 或 `/start.d/log`。

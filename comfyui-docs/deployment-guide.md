@@ -33,7 +33,7 @@ df -h ~
 
 sudo apt update
 sudo apt install -y git curl wget vim build-essential tmux htop ca-certificates \
-  ffmpeg libgl1 libglib2.0-0 aria2 nvtop ncdu pciutils
+  ffmpeg libgl1 libglib2.0-0 aria2 nvtop ncdu pciutils iproute2
 
 
 

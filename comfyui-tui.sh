@@ -16,7 +16,7 @@ ROOT_HOME="$(getent passwd root 2>/dev/null | cut -d: -f6)" || ROOT_HOME="/root"
 BK_ROOT="/root/vps-init-backups"
 BK_KEEP=20
 
-COMFY_BASE="git curl wget vim build-essential tmux htop ca-certificates ffmpeg libgl1 libglib2.0-0 aria2 nvtop ncdu pciutils"
+COMFY_BASE="git curl wget vim build-essential tmux htop ca-certificates ffmpeg libgl1 libglib2.0-0 aria2 nvtop ncdu pciutils iproute2"
 MINIFORGE_URL="https://mirrors.tuna.tsinghua.edu.cn/github-release/conda-forge/miniforge/LatestRelease/Miniforge3-Linux-x86_64.sh"
 MINIFORGE_FALLBACK="https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
 CONDA_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud"
@@ -40,10 +40,13 @@ SERVICE_NAME="comfyui"
 UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 STARTD_DIR="/start.d"
 STARTD_FILE="${STARTD_DIR}/comfyui.sh"
+STARTD_LOG_DIR="${STARTD_DIR}/log"
+STARTD_LOG_FILE="${STARTD_LOG_DIR}/comfyui.log"
 PORT=8188
 
 # 本次进程内的选择；不落盘
 CPU_MODE=0
+CPU_MODE_DECIDED=0
 ACCESS_MODE=""
 PY_VER="3.13"
 CONDA_ENV_NAME="comfyui"
@@ -431,16 +434,37 @@ gpu_cuda_version() {
 }
 cuda_major() { local v="$1"; printf '%s' "${v%%.*}"; }
 
+disk_target_dir() {
+  if [[ -d "${COMFY_DIR}" ]]; then
+    printf '%s' "${COMFY_DIR}"
+  else
+    printf '%s' "${ROOT_HOME}"
+  fi
+}
+
 disk_avail_gb() {
-  local out
-  out="$(df -Pk "${ROOT_HOME}" 2>/dev/null || true)"
+  local out target
+  target="$(disk_target_dir)"
+  out="$(df -Pk "${target}" 2>/dev/null || true)"
   awk 'NR==2 {printf "%d", $4/1024/1024}' <<< "${out}"
 }
 
 port_listening() {
-  local out
-  out="$(ss -tln 2>/dev/null || true)"
-  [[ "${out}" == *":${PORT}"* ]]
+  local out hex_port
+  local -a tcp_files=()
+  if command -v ss >/dev/null 2>&1; then
+    out="$(ss -tln 2>/dev/null || true)"
+    if [[ -n "${out}" ]]; then
+      grep -Eq ":${PORT}([[:space:]]|$)" <<< "${out}" && return 0
+      return 1
+    fi
+  fi
+  [[ -r /proc/net/tcp ]] && tcp_files+=(/proc/net/tcp)
+  [[ -r /proc/net/tcp6 ]] && tcp_files+=(/proc/net/tcp6)
+  (( ${#tcp_files[@]} > 0 )) || return 1
+  printf -v hex_port '%04X' "${PORT}"
+  awk -v p=":${hex_port}" 'FNR>1 && $4=="0A" && toupper($2) ~ (p "$") {found=1; exit} END{exit !found}' \
+    "${tcp_files[@]}" 2>/dev/null
 }
 
 fw_installed() { command -v ufw >/dev/null 2>&1; }
@@ -456,7 +480,10 @@ fw_has_port() {
   [[ "${out}" == *"${PORT}/tcp"* ]]
 }
 
-systemd_present() { [[ "$(ps -p 1 -o comm= 2>/dev/null || true)" == "systemd" ]]; }
+systemd_present() {
+  [[ -d /run/systemd/system ]] && return 0
+  [[ "$(ps -p 1 -o comm= 2>/dev/null || true)" == "systemd" ]]
+}
 unit_exists() { [[ -f "${UNIT_FILE}" ]]; }
 startd_exists() { [[ -d "${STARTD_DIR}" ]]; }
 startd_configured() { startd_exists && [[ -f "${STARTD_FILE}" ]]; }
@@ -638,7 +665,11 @@ comfy_summary() {
 pip_version() {
   local pkg="$1"
   [[ -x "${ENV_PY}" ]] || return 0
-  run_with_timeout 5 env_py -c "import importlib.metadata as m; print(m.version('${pkg}'))" 2>/dev/null || true
+  run_with_timeout 20 env_py -c "import importlib.metadata as m; print(m.version('${pkg}'))" 2>/dev/null || true
+}
+
+manager_installed() {
+  [[ -n "$(pip_version comfyui_manager)" ]]
 }
 
 public_ip() {
@@ -976,6 +1007,7 @@ detect_or_install_driver() {
   DRIVER_CHANGED=0
   if gpu_hardware_present; then
     CPU_MODE=0
+    CPU_MODE_DECIDED=1
     if gpu_driver_ready; then
       cv="$(gpu_cuda_version)"
       major="$(cuda_major "${cv}")"
@@ -1009,6 +1041,7 @@ detect_or_install_driver() {
     fi
     if ask_yesno "不装驱动，改用 CPU 测试模式继续？" n; then
       CPU_MODE=1
+      CPU_MODE_DECIDED=1
       return 0
     fi
     die_action "已中止"
@@ -1016,6 +1049,7 @@ detect_or_install_driver() {
   fi
   if ask_yesno "未检测到 NVIDIA GPU，进入 CPU 测试模式？" n; then
     CPU_MODE=1
+    CPU_MODE_DECIDED=1
     return 0
   fi
   die_action "没有 GPU 且未选择 CPU 模式，已中止"
@@ -1511,19 +1545,27 @@ requirements_install() {
       die_action "Manager requirements 安装失败"
       return 1
     fi
+    if ! manager_installed; then
+      warn "已执行 manager_requirements.txt，但仍未检测到 comfyui_manager 包"
+    fi
   else
-    log "未找到 manager_requirements.txt，跳过内置 Manager 依赖"
+    warn "未找到 manager_requirements.txt，跳过内置 Manager 依赖"
   fi
   return 0
 }
 
 smoke_test() {
-  local -a args=(main.py --quick-test-for-ci --enable-manager)
-  if (( CPU_MODE )); then args+=(--cpu); fi
+  local -a args=(main.py --quick-test-for-ci)
   if ! comfy_present || ! env_ok; then
     die_action "ComfyUI 或 Python 环境未就绪"
     return 1
   fi
+  if manager_installed; then
+    args+=(--enable-manager)
+  else
+    warn "未检测到 comfyui_manager，冒烟测试不带 --enable-manager"
+  fi
+  if (( CPU_MODE )); then args+=(--cpu); fi
   if service_active || port_listening; then
     log "服务或 8188 已在运行，跳过前台冒烟测试（终检会验证 HTTP）"
     return 0
@@ -1540,25 +1582,42 @@ smoke_test() {
 # ============ 访问方式 / 防火墙 ============
 ensure_fw_8188() {
   if ! fw_installed; then
-    warn "UFW 未安装：8188 的可达性完全由云安全组决定"
+    if ! systemd_present; then
+      warn "容器环境（非 systemd）未安装 UFW：${PORT} 的可达性由平台端口映射与云安全组决定"
+      return 0
+    fi
+    warn "UFW 未安装：${PORT} 的可达性目前由云安全组决定（如需本机防火墙建议配合 00-tui.sh）"
+    if ask_yesno "现在安装 UFW 并预放行 ${PORT}/tcp（不自动启用 UFW，避免影响 SSH）？" n; then
+      apt_update_index || return 1
+      if ! apt_run install -y ufw; then
+        die_action "安装 ufw 失败"
+        return 1
+      fi
+      apt_clean_archives
+      if ufw allow "${PORT}/tcp"; then
+        log "已安装 ufw 并预放行 ${PORT}/tcp（当前仍为 inactive，请用 00-tui.sh 放行 SSH 后再启用）"
+      else
+        warn "已安装 ufw，但预写入 ${PORT}/tcp 规则失败"
+      fi
+    fi
     return 0
   fi
   if ! fw_active; then
-    warn "UFW 未启用：8188 的可达性完全由云安全组决定（建议先跑 00-tui.sh 做安全基线）"
+    warn "UFW 未启用：${PORT} 的可达性完全由云安全组决定（建议先跑 00-tui.sh 做安全基线）"
     return 0
   fi
   if fw_has_port; then
-    log "UFW 已放行 8188/tcp（已满足）"
+    log "UFW 已放行 ${PORT}/tcp（已满足）"
     return 0
   fi
-  if ask_yesno "UFW 放行 8188/tcp？来源不限制，建议在云安全组限制为你自己的 IP" y; then
+  if ask_yesno "UFW 放行 ${PORT}/tcp？来源不限制，建议在云安全组限制为你自己的 IP" y; then
     if ! ufw allow "${PORT}/tcp"; then
       die_action "ufw allow ${PORT}/tcp 失败"
       return 1
     fi
-    log "已放行 8188/tcp"
+    log "已放行 ${PORT}/tcp"
   else
-    warn "未放行 8188：UFW active 时公网将无法访问"
+    warn "未放行 ${PORT}：UFW active 时公网将无法访问"
   fi
   return 0
 }
@@ -1592,7 +1651,12 @@ extract_existing_extra_args() {
 
 build_comfy_args() {
   extract_existing_extra_args
-  COMFY_ARGS=(main.py --enable-manager)
+  COMFY_ARGS=(main.py)
+  if manager_installed; then
+    COMFY_ARGS+=(--enable-manager)
+  else
+    warn "未检测到 comfyui_manager，自启参数暂不带 --enable-manager"
+  fi
   if [[ "${ACCESS_MODE}" == "listen" ]]; then
     COMFY_ARGS+=(--listen 0.0.0.0 --port "${PORT}")
   fi
@@ -1607,8 +1671,7 @@ build_comfy_args() {
 sync_runtime_mode() {
   if ! gpu_hardware_present; then
     CPU_MODE=1
-  fi
-  if config_has_cpu; then
+  elif (( CPU_MODE_DECIDED == 0 )) && config_has_cpu; then
     CPU_MODE=1
   fi
 }
@@ -1690,6 +1753,65 @@ EOF
   return 0
 }
 
+comfy_running_pids() {
+  local p cmd cwd
+  for p in /proc/[0-9]*; do
+    [[ "${p##*/}" != "$$" && -r "${p}/cmdline" ]] || continue
+    cmd="$(tr '\0' ' ' < "${p}/cmdline" 2>/dev/null || true)"
+    [[ "${cmd}" == *"main.py"* ]] || continue
+    cwd="$(readlink -f "${p}/cwd" 2>/dev/null || true)"
+    if [[ "${cmd}" == *"${ENV_PY}"* || "${cmd}" == *"${COMFY_DIR}/main.py"* || "${cwd}" == "${COMFY_DIR}" ]]; then
+      printf '%s\n' "${p##*/}"
+    fi
+  done
+}
+
+startd_stop() {
+  local -a pids=()
+  local i alive=0 p
+  mapfile -t pids < <(comfy_running_pids)
+  (( ${#pids[@]} > 0 )) || return 0
+  kill "${pids[@]}" 2>/dev/null || true
+  for (( i = 0; i < 10; i++ )); do
+    alive=0
+    for p in "${pids[@]}"; do
+      if kill -0 "${p}" 2>/dev/null; then
+        alive=1; break
+      fi
+    done
+    (( alive == 0 )) && return 0
+    sleep 1
+  done
+  kill -9 "${pids[@]}" 2>/dev/null || true
+  return 0
+}
+
+startd_launch_bg() {
+  local logf="${STARTD_LOG_FILE}" bg_pid
+  local -a pids=()
+  if ! startd_configured; then
+    die_action "${STARTD_FILE} 尚未配置"
+    return 1
+  fi
+  mapfile -t pids < <(comfy_running_pids)
+  if (( ${#pids[@]} > 0 )) || port_listening; then
+    log "ComfyUI 已在运行，跳过重复拉起"
+    return 0
+  fi
+  if ! mkdir -p "${STARTD_LOG_DIR}" 2>/dev/null; then
+    logf="/tmp/comfyui-startd.log"
+  fi
+  nohup "${STARTD_FILE}" </dev/null >>"${logf}" 2>&1 &
+  bg_pid=$!
+  sleep 1
+  if ! kill -0 "${bg_pid}" 2>/dev/null; then
+    die_action "后台启动 ComfyUI 失败；查看日志：${logf}"
+    return 1
+  fi
+  log "已在后台启动 ComfyUI（PID ${bg_pid}，日志：${logf}）"
+  return 0
+}
+
 autostart_write() {
   if [[ -z "${ACCESS_MODE}" ]]; then
     ACCESS_MODE="$(current_access_mode)"
@@ -1697,17 +1819,17 @@ autostart_write() {
   if (( CPU_MODE == 0 )) && gpu_hardware_present && ! gpu_driver_ready; then
     if ask_yesno "GPU 驱动未就绪，按 CPU 模式写入启动参数？" n; then
       CPU_MODE=1
+      CPU_MODE_DECIDED=1
     else
       warn "将写入 GPU 启动参数；服务可能无法启动"
     fi
   fi
-  build_comfy_args
   if systemd_present; then
     write_systemd_unit || return 1
   elif startd_exists; then
     write_startd_script || return 1
   else
-    warn "未检测到 systemd 或 /start.d；跳过自启配置"
+    warn "未检测到 systemd 或 /start.d；跳过开机自启配置"
     return 0
   fi
   return 0
@@ -1743,7 +1865,13 @@ service_restart() {
     return 0
   fi
   if startd_configured; then
-    warn "容器平台无 systemd；重启实例后由 ${STARTD_FILE} 接管"
+    startd_stop
+    startd_launch_bg || return 1
+    if wait_http_up; then
+      log "服务已在 127.0.0.1:${PORT} 响应"
+    else
+      warn "服务 60 秒内未响应；查看 ${STARTD_LOG_FILE}"
+    fi
     return 0
   fi
   warn "服务尚未配置"
@@ -1755,7 +1883,35 @@ service_action() {
   action="$(ask_input_def "动作" v_action "status")" || return 1
   if ! unit_exists || ! systemd_present; then
     if startd_configured; then
-      warn "容器平台无 systemd；请重启实例，或手动执行 ${STARTD_FILE}"
+      case "${action}" in
+        start)
+          startd_launch_bg || return 1
+          if wait_http_up; then
+            log "服务已在 127.0.0.1:${PORT} 响应"
+          else
+            warn "服务 60 秒内未响应；查看 ${STARTD_LOG_FILE}"
+          fi
+          ;;
+        stop)
+          startd_stop
+          log "已停止 ComfyUI 后台进程"
+          ;;
+        restart)
+          service_restart || return 1
+          ;;
+        status)
+          local -a pids=()
+          mapfile -t pids < <(comfy_running_pids)
+          if (( ${#pids[@]} > 0 )); then
+            log "运行中 PID：${pids[*]}"
+          else
+            warn "当前未检测到运行中的 ComfyUI 进程"
+          fi
+          if [[ -f "${STARTD_LOG_FILE}" ]]; then
+            tail -n 20 "${STARTD_LOG_FILE}" 2>&1 || true
+          fi
+          ;;
+      esac
       return 0
     fi
     warn "服务尚未配置"
@@ -1880,6 +2036,8 @@ verify_all() {
     else check_warn "systemd 开机自启未启用"; fi
   elif startd_configured; then
     check_ok "/start.d 自启脚本已配置"
+  elif ! systemd_present && ! startd_exists; then
+    check_warn "当前容器无 systemd 且无 /start.d，无法配置系统级开机自启"
   else
     check_fail "未配置开机自启"
   fi
@@ -1895,7 +2053,11 @@ verify_all() {
 
   if [[ "$(current_access_mode)" == "listen" ]]; then
     if ! fw_installed; then
-      check_warn "UFW 未安装；放行 ${PORT} 只能靠云安全组"
+      if ! systemd_present; then
+        check_warn "容器环境未安装 UFW；放行 ${PORT} 由平台映射/云安全组控制"
+      else
+        check_warn "UFW 未安装；放行 ${PORT} 只能靠云安全组"
+      fi
     elif ! fw_active; then
       check_warn "UFW 未启用；放行 ${PORT} 只能靠云安全组"
     elif fw_has_port; then
@@ -2039,7 +2201,15 @@ do_standard_deploy() {
       warn "服务 60 秒内未响应；查看 journalctl -u ${SERVICE_NAME} -n 100"
     fi
   elif startd_configured; then
-    log "容器平台：请重启实例，${STARTD_FILE} 会自动拉起 ComfyUI；重启后运行菜单 9 终检"
+    if startd_launch_bg; then
+      if wait_http_up; then
+        log "服务已在 127.0.0.1:${PORT} 响应（重启容器后由 ${STARTD_FILE} 自动拉起）"
+      else
+        warn "服务 60 秒内未响应；查看 ${STARTD_LOG_FILE}"
+      fi
+    else
+      warn "当前会话后台启动未成功；请检查日志或重启实例后由 ${STARTD_FILE} 自动拉起"
+    fi
   fi
 
   step_banner 11 "终检"
@@ -2068,7 +2238,7 @@ status_menu() {
   printf '\n[CUDA Toolkit]\n'
   if command -v nvcc >/dev/null 2>&1; then nvcc --version 2>&1 || true; else printf 'nvcc 未安装\n'; fi
   printf '\n[磁盘 / 内存]\n'
-  df -h "${ROOT_HOME}" 2>&1 || true
+  df -h "$(disk_target_dir)" 2>&1 || true
   free -h 2>&1 || true
   printf '\n[Miniforge / Python]\n'
   if miniforge_ok; then "${CONDA_BIN}" --version 2>&1 || true; else printf 'Miniforge/conda 未安装\n'; fi
@@ -2096,7 +2266,13 @@ status_menu() {
   else
     printf '服务未配置\n'
   fi
-  ss -tlnp 2>&1 | grep -E ":${PORT}\b|State" || true
+  if command -v ss >/dev/null 2>&1; then
+    ss -tlnp 2>&1 | grep -E ":${PORT}\b|State" || true
+  elif port_listening; then
+    printf '端口 %s 正在监听（/proc/net/tcp）\n' "${PORT}"
+  else
+    printf 'ss 未安装且未检测到端口 %s 监听\n' "${PORT}"
+  fi
   if fw_installed; then ufw status 2>&1 || true; else printf 'UFW 未安装\n'; fi
   printf '\n[镜像连通性]\n'
   mirror_check "清华 Miniforge" "${MINIFORGE_URL}" || true
@@ -2597,9 +2773,16 @@ apply_access_mode() {
   sync_runtime_mode
   if unit_exists || startd_configured; then
     autostart_write || return 1
+    if startd_configured && { port_listening || [[ -n "$(comfy_running_pids)" ]]; }; then
+      service_restart || return 1
+    fi
   elif env_ok && comfy_present; then
     if ask_yesno "尚未配置开机自启，现在按 ${ACCESS_MODE} 模式写入自启配置？" y; then
       autostart_write || return 1
+      if startd_configured; then
+        startd_launch_bg || return 1
+        wait_http_up || warn "服务 60 秒内未响应；查看 ${STARTD_LOG_FILE}"
+      fi
     else
       warn "未写入自启服务；如手动启动，请按需加减 --listen 0.0.0.0 --port ${PORT}"
     fi
@@ -2627,7 +2810,11 @@ service_summary() {
     st="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || true)"
     printf '%s' "${st:-unknown}"
   elif startd_configured; then
-    printf '/start.d 已配置'
+    if port_listening || [[ -n "$(comfy_running_pids)" ]]; then
+      printf '/start.d 运行中'
+    else
+      printf '/start.d 未运行'
+    fi
   else
     printf '未配置'
   fi
@@ -2687,12 +2874,15 @@ toggle_cpu_mode() {
     CPU_MODE=1
     log "切换为 CPU 启动参数（--cpu）"
   fi
+  CPU_MODE_DECIDED=1
   ACCESS_MODE="$(current_access_mode)"
-  build_comfy_args
   if unit_exists; then
     write_systemd_unit || return 1
   elif startd_configured; then
     write_startd_script || return 1
+    if port_listening || [[ -n "$(comfy_running_pids)" ]]; then
+      service_restart || return 1
+    fi
   else
     warn "尚未配置自启，先在菜单 8 写入"
   fi
@@ -2783,7 +2973,11 @@ service_header() {
     if service_enabled; then printf ' / enabled'; fi
     printf ' / %s' "$(current_access_mode)"
   elif startd_configured; then
-    printf '/start.d / %s' "$(current_access_mode)"
+    if port_listening || [[ -n "$(comfy_running_pids)" ]]; then
+      printf '%s / %s' "$(ui_yes '/start.d active')" "$(current_access_mode)"
+    else
+      printf '%s / %s' "$(ui_no '/start.d 未运行')" "$(current_access_mode)"
+    fi
   else
     printf '%s' "未配置"
   fi

@@ -88,7 +88,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/Pathto18
 | `q` | 退出 |
 
 <!-- 与 comfyui-tui.sh 的 COMFY_BASE 保持一致；tools/sync_check.sh 会比对 -->
-ComfyUI 基础包：`git curl wget vim build-essential tmux htop ca-certificates ffmpeg libgl1 libglib2.0-0 aria2 nvtop ncdu pciutils`
+ComfyUI 基础包：`git curl wget vim build-essential tmux htop ca-certificates ffmpeg libgl1 libglib2.0-0 aria2 nvtop ncdu pciutils iproute2`
 
 详细说明见 [ComfyUI 文档](comfyui-docs/README.md)、[部署指南](comfyui-docs/deployment-guide.md) 与 [CPU 测试指南](comfyui-docs/cpu-test-guide.md)。
 
