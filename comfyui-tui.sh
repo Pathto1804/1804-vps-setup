@@ -2297,7 +2297,7 @@ show_access_info() {
   printf '\n  %s注意事项：%s\n' "${C_D}" "${C_0}"
   printf '    - 上方 IP 为本机出口 IP；若使用独立 EIP，请以云控制台为准。\n'
   printf '    - 云安全组需放行 %s/tcp，来源建议限制为你自己的 IP/32。\n' "${PORT}"
-  printf '    - Manager 插件安装受限于安全策略，listen 模式下需先到菜单 7 切换为隧道模式。\n'
+  printf '    - Manager 插件安装受限于安全策略，listen 模式下可到菜单 7 切换隧道模式或调整 Manager 安全等级。\n'
   ui_sep
 }
 
@@ -3078,6 +3078,167 @@ model_menu() {
   done
 }
 
+# ============ ComfyUI-Manager 安全等级 ============
+manager_config_file() {
+  local p
+  for p in \
+    "${COMFY_DIR}/user/__manager/config.ini" \
+    "${COMFY_DIR}/user/default/ComfyUI-Manager/config.ini" \
+    "${COMFY_DIR}/custom_nodes/ComfyUI-Manager/config.ini"; do
+    if [[ -f "${p}" ]]; then
+      printf '%s' "${p}"
+      return 0
+    fi
+  done
+  return 0
+}
+
+manager_security_raw() {
+  local cfg val
+  cfg="$(manager_config_file)"
+  [[ -n "${cfg}" && -f "${cfg}" ]] || return 0
+  val="$(awk -F= '/^[[:space:]]*security_level[[:space:]]*=/{sub(/^[[:space:]]+/, "", $2); sub(/[[:space:]]*([#;].*)?$/, "", $2); gsub(/\r/, "", $2); print $2; exit}' "${cfg}" 2>/dev/null || true)"
+  printf '%s' "${val}"
+}
+
+manager_security_summary() {
+  local cfg val
+  if ! comfy_present; then
+    printf 'ComfyUI 未安装'
+    return 0
+  fi
+  cfg="$(manager_config_file)"
+  if [[ -z "${cfg}" ]]; then
+    printf 'normal（默认，未生成 config.ini）'
+    return 0
+  fi
+  val="$(manager_security_raw)"
+  if [[ -n "${val}" ]]; then
+    printf '%s (%s)' "${val}" "${cfg}"
+  else
+    printf 'normal（默认，%s）' "${cfg}"
+  fi
+}
+
+write_manager_security_level() {
+  local level="$1" cfg tmp
+  case "${level}" in
+    normal|weak|strong) ;;
+    *) die_action "不支持的 Manager 安全等级：${level}"; return 1 ;;
+  esac
+  if ! comfy_present; then
+    die_action "未在 ${COMFY_DIR} 检测到 ComfyUI（缺少 main.py）"
+    return 1
+  fi
+  cfg="$(manager_config_file)"
+  if [[ -z "${cfg}" ]]; then
+    cfg="${COMFY_DIR}/user/__manager/config.ini"
+  fi
+  if ! mkdir -p "$(dirname "${cfg}")"; then
+    die_action "创建 Manager 配置目录失败：$(dirname "${cfg}")"
+    return 1
+  fi
+  if [[ -f "${cfg}" ]]; then
+    backup_file "${cfg}" >/dev/null || true
+  fi
+  tmp="$(mktemp)" || { die_action "创建临时文件失败"; return 1; }
+  if [[ -f "${cfg}" ]]; then
+    if ! awk -v lvl="${level}" '
+      BEGIN { done=0; in_def=0; has_def=0 }
+      /^[[:space:]]*\[default\][[:space:]]*\r?$/ {
+        has_def=1; in_def=1; print; next
+      }
+      /^[[:space:]]*\[[^]]+\][[:space:]]*\r?$/ {
+        if (in_def && !done) { print "security_level = " lvl; done=1 }
+        in_def=0; print; next
+      }
+      /^[[:space:]]*security_level[[:space:]]*=/ {
+        if (!done) { print "security_level = " lvl; done=1; next }
+      }
+      { print }
+      END {
+        if (!done) {
+          if (!has_def) print "[default]"
+          print "security_level = " lvl
+        }
+      }
+    ' "${cfg}" > "${tmp}"; then
+      rm -f -- "${tmp}"
+      die_action "生成 Manager 配置失败：${cfg}"
+      return 1
+    fi
+  else
+    printf '[default]\nsecurity_level = %s\n' "${level}" > "${tmp}" || {
+      rm -f -- "${tmp}"
+      die_action "写入临时配置失败"
+      return 1
+    }
+  fi
+  if ! mv -f -- "${tmp}" "${cfg}"; then
+    rm -f -- "${tmp}"
+    die_action "写入 Manager 配置失败：${cfg}"
+    return 1
+  fi
+  log "已将 Manager security_level 设为 ${level}（${cfg}）"
+  return 0
+}
+
+manager_security_action() {
+  local cur cfg target reply running=0
+  if ! comfy_present; then
+    die_action "未在 ${COMFY_DIR} 检测到 ComfyUI（缺少 main.py）"
+    return 1
+  fi
+  cfg="$(manager_config_file)"
+  cur="$(manager_security_raw)"
+  printf '\n%sComfyUI-Manager 安全等级（security_level）%s\n' "${C_B}" "${C_0}"
+  ui_sep
+  ui_kv "当前等级" "${cur:-normal（默认）}"
+  ui_kv "配置文件" "${cfg:-${COMFY_DIR}/user/__manager/config.ini（将新建）}"
+  ui_sep
+  printf '  %s说明：%s--listen 0.0.0.0 模式下，normal 会拦截网页端安装/更新插件。\n' "${C_D}" "${C_0}"
+  printf '  %s警告：%sweak 会允许任何能访问 %s 端口的人安装/执行插件代码；装完建议切回 normal。\n' "${C_Y}" "${C_0}" "${PORT}"
+  ui_sep
+  ui_item 1 "normal（默认，推荐：公网模式禁止网页安装插件）"
+  ui_item 2 "weak（允许 --listen 0.0.0.0 下网页安装插件）"
+  ui_item 3 "strong（最严格限制）"
+  ui_item 0 "取消并返回"
+  ui_sep
+  ask_menu "选择安全等级" 3 "取消"
+  reply="${UI_REPLY}"
+  case "${reply}" in
+    0) return 0 ;;
+    1) target="normal" ;;
+    2) target="weak" ;;
+    3) target="strong" ;;
+  esac
+  if [[ -n "${cfg}" && "${cur}" == "${target}" ]]; then
+    log "Manager security_level 已是 ${target}（${cfg}），无需修改"
+    return 0
+  fi
+  if [[ "${target}" == "weak" ]]; then
+    if ! ask_yesno "确认将 security_level 设为 weak？（公网暴露时存在远程代码执行风险）" n; then
+      warn "已取消修改 security_level"
+      return 0
+    fi
+  fi
+  write_manager_security_level "${target}" || return 1
+  if { systemd_present && unit_exists && systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; } || \
+     { startd_configured && [[ -n "$(comfy_running_pids)" ]]; }; then
+    running=1
+  fi
+  if (( running )); then
+    if ask_yesno "配置已写入，是否立即重启 ComfyUI 服务使其生效？" y; then
+      service_restart || return 1
+    else
+      warn "请稍后手动重启 ComfyUI 服务使 security_level=${target} 生效"
+    fi
+  else
+    log "提示：下次启动 ComfyUI 时将应用 security_level=${target}"
+  fi
+  return 0
+}
+
 # ============ 菜单：访问方式 ============
 access_menu() {
   local reply
@@ -3089,6 +3250,7 @@ access_menu() {
     ui_kv "当前方式" "$(current_access_mode)"
     ui_kv "UFW" "$(fw_active && printf 'active' || printf 'inactive/未安装')"
     ui_kv "${PORT}" "$(if fw_has_port; then fw_active && printf '已放行' || printf '已预写（UFW 未启用）'; else printf '未放行'; fi)"
+    ui_kv "Manager安全" "$(manager_security_summary)"
     ui_sep
     printf '  %s默认监听 0.0.0.0:%s，无鉴权；公网直连风险自负。%s\n' "${C_Y}" "${PORT}" "${C_0}"
     ui_sep
@@ -3097,9 +3259,10 @@ access_menu() {
     ui_item 3 "设置为仅回环 + SSH 隧道"
     ui_item 4 "仅检查 / 放行 UFW ${PORT} 端口（不改服务）"
     ui_item 5 "重启服务使配置生效"
+    ui_item 6 "切换 Manager 安全等级（normal / weak / strong）"
     ui_quit
     ui_sep
-    ask_menu "选择" 5
+    ask_menu "选择" 6
     reply="${UI_REPLY}"
     case "${reply}" in
       0) return 0 ;;
@@ -3108,6 +3271,7 @@ access_menu() {
       3) ACCESS_MODE="tunnel"; act apply_access_mode || true; scr_pause ;;
       4) act ensure_fw_8188 || true; scr_pause ;;
       5) act service_restart || true; scr_pause ;;
+      6) act manager_security_action || true; scr_pause ;;
     esac
   done
 }

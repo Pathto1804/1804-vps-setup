@@ -51,7 +51,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/Pathto18
 - 默认写入 `--listen 0.0.0.0 --port 8188`，终检打印 `http://<公网IP>:8188`。
 - 菜单 `7` 可切换为“仅回环 + SSH 隧道”，移除 `--listen` 并重启；同时打印 `ssh -N -L 8188:127.0.0.1:8188 root@<IP>`。
 - UFW active 时，默认流程问一次并放行 8188/tcp；UFW inactive 时不启用，只提示云安全组；systemd 主机未装 UFW 时可选按需安装并预写 8188 规则（不自动启用），容器实例跳过 UFW 仅提示平台端口映射与云安全组。
-- ComfyUI-Manager 在 listen 模式下会拦截界面装插件；需要装插件时切菜单 `7` 的隧道模式，或终端进 `~/ComfyUI/custom_nodes` 手动 clone。
+- ComfyUI-Manager 在 listen 模式下会拦截界面装插件；可在菜单 `7` 切为隧道模式、在菜单 `7` 切换 Manager 安全等级（`weak` 需二次确认，装完建议切回 `normal`），或终端进 `~/ComfyUI/custom_nodes` 手动 clone。
 
 ## 基础包
 

@@ -69,7 +69,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/Pathto18
 
 - **适用平台**：Ubuntu 22.04/24.04 一等支持（Debian 12/13 仅 NVIDIA 官方源路径，兼容未逐版本验证）。
 - **前置条件**：`x86_64`、`root`、交互终端、家目录可用空间建议 >=30GB（<10GB 中止）；GPU 模式要求 `nvidia-smi` CUDA Version >=13.0（驱动 >=580，不提供 `cu126` 回退），无 GPU 可选 CPU 测试模式。已配置过部分环境的机器会自动探测已有 ComfyUI 目录与 Python 环境（conda/venv），各子菜单可单独执行并按需升级驱动/PyTorch。
-- **访问与安全**：**默认 `--listen 0.0.0.0:8188`**，ComfyUI 无鉴权。需在云安全组放行 `8188/tcp`（建议限制来源为本人 IP/32）；UFW active 时标准部署会询问放行；菜单 `7` 可切换为仅回环 + SSH 隧道。
+- **访问与安全**：**默认 `--listen 0.0.0.0:8188`**，ComfyUI 无鉴权。需在云安全组放行 `8188/tcp`（建议限制来源为本人 IP/32）；UFW active 时标准部署会询问放行；菜单 `7` 可切换为仅回环 + SSH 隧道，或调整 ComfyUI-Manager 安全等级（`normal` / `weak` / `strong`）。
 
 ### 主菜单
 

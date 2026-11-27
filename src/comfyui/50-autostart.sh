@@ -444,7 +444,7 @@ show_access_info() {
   printf '\n  %s注意事项：%s\n' "${C_D}" "${C_0}"
   printf '    - 上方 IP 为本机出口 IP；若使用独立 EIP，请以云控制台为准。\n'
   printf '    - 云安全组需放行 %s/tcp，来源建议限制为你自己的 IP/32。\n' "${PORT}"
-  printf '    - Manager 插件安装受限于安全策略，listen 模式下需先到菜单 7 切换为隧道模式。\n'
+  printf '    - Manager 插件安装受限于安全策略，listen 模式下可到菜单 7 切换隧道模式或调整 Manager 安全等级。\n'
   ui_sep
 }
 

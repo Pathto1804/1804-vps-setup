@@ -80,4 +80,27 @@ assert_eq "${#CMD_WORDS[@]}" "5" "tokenize_cmdline 正确切分含空格引号�
 assert_eq "${CMD_WORDS[3]}" "foo bar" "tokenize_cmdline 还原双引号内容"
 assert_eq "${CMD_WORDS[4]}" "--flag=a b" "tokenize_cmdline 还原单引号内容"
 
+# 5. 验证 ComfyUI-Manager security_level 探测、新建、保留更新与备份
+BK_ROOT="${TEST_TMP}/vps-init-backups"
+assert_eq "$(manager_config_file)" "" "未生成 config.ini 时探测返回空"
+assert_eq "$(manager_security_raw)" "" "未生成 config.ini 时读取等级为空"
+
+write_manager_security_level "weak"
+mgr_cfg="${COMFY_DIR}/user/__manager/config.ini"
+assert_eq "$(manager_config_file)" "${mgr_cfg}" "新建默认写入 user/__manager/config.ini"
+assert_eq "$(manager_security_raw)" "weak" "新建后读取到 weak"
+
+cat > "${mgr_cfg}" <<EOF
+[default]
+preview_method = auto
+# 保留注释
+security_level = normal
+bypass_ssl = False
+EOF
+write_manager_security_level "strong"
+assert_eq "$(manager_security_raw)" "strong" "更新已有 config.ini 为 strong"
+assert_rc 0 grep -qF "preview_method = auto" "${mgr_cfg}"
+assert_rc 0 grep -qF "# 保留注释" "${mgr_cfg}"
+assert_eq "$(find "${BK_ROOT}" -type f -name 'config.ini' | wc -l | tr -d ' ')" "1" "修改前已备份 config.ini"
+
 finish_test_file "test_comfyui_parsing"

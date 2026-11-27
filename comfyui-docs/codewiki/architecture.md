@@ -39,6 +39,7 @@ graph TD
 | 访问方式与端口 | 有效启动命令分词解析 `--listen`（无参数或非回环地址为 `listen`；未带 `--listen` 或 `127.0.0.1`/`::1`/`localhost` 为 `tunnel`）及 `--port`（兼容算力平台自定义端口） |
 | 端口与 HTTP | `ss -tln` 优先，回退 `/proc/net/tcp`、`/proc/net/tcp6`；HTTP 校验 `127.0.0.1:${PORT}/system_stats` 区分 ComfyUI 与其他端口占用进程 |
 | 防火墙 | `ufw status`（`active` 时精确匹配端口列与 `ALLOW`/`LIMIT` 动作）；`inactive` 时回退 `ufw show added` 识别预写规则 |
+| Manager 安全等级 | 按序探测 `COMFY_DIR/user/__manager/config.ini`、`user/default/ComfyUI-Manager/config.ini`、`custom_nodes/ComfyUI-Manager/config.ini` 的 `security_level` |
 | 公网 IP | 终检 `curl` 依次请求 `api.ipify.org` / `ifconfig.me` / `ipinfo.io/ip`；失败打印占位 |
 
 **没有项目私有状态文件**：不写 `comfyui.conf`、不写进度标记。用户输入（CPU/GPU、访问方式、本次会话切换的 `COMFY_DIR` / `ENV_PY`）只存在于本次进程；服务、路径与访问方式一旦写入 unit/start.d，下次直接从原生系统文件探测读回。
@@ -55,6 +56,7 @@ graph TD
 | `/root/.bashrc` | Miniforge `conda init`、cuda-toolkit PATH | shell 找不到 conda/nvcc |
 | `/etc/apt/sources.list.d/cuda-*.list`、`/usr/share/keyrings/cuda-archive-keyring.gpg` | 菜单 3 / 标准部署（接入 NVIDIA 官方源时） | 回退系统默认 apt 源 |
 | `/etc/apt/sources.list*` | 菜单 2 / 标准部署（用户确认执行 LinuxMirrors 换源时） | 影响系统 apt 软件源 |
+| `${COMFY_DIR}/user/__manager/config.ini`（或既有 Manager 配置路径） | 菜单 7（切换 Manager 安全等级） | 回退 Manager 默认安全策略（`normal`） |
 | `/root/vps-init-backups/<时间戳>/` | 所有写配置前 | 失去人工回滚副本 |
 | `/tmp/comfyui-tui.XXXXXX/` | 驱动 keyring、Miniforge 安装包、unit/start.d 候选文件 | 无影响（EXIT 清理） |
 

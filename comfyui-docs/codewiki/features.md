@@ -77,7 +77,7 @@ clone/pull（非 Git 但含 `main.py` 目录保留代码）、配 pip 阿里源�
 
 ## `7` 远程访问与防火墙
 
-查看当前访问方式（从有效启动行分词解析 `--listen` 地址，区分回环与公网）、公网 URL、SSH 隧道命令、UFW（`active` 精确匹配 `ALLOW`/`LIMIT`，`inactive` 回退 `ufw show added`）；设置为 listen（默认，UFW active 时问一次放行端口；systemd 主机缺 UFW 时可选按需安装并预写规则而不自动启用）或 tunnel（移除 `--listen`，保留非默认 `--port`，按变更重启）；**仅检查/放行 UFW 端口（不改自启服务）**；重启服务（同时支持 systemd 与 `/start.d` 后台进程）。未配自启服务时设置访问方式不报错中断，只按需更新防火墙并提示手动参数。
+查看当前访问方式（从有效启动行分词解析 `--listen` 地址，区分回环与公网）、公网 URL、SSH 隧道命令、UFW（`active` 精确匹配 `ALLOW`/`LIMIT`，`inactive` 回退 `ufw show added`）、ComfyUI-Manager 安全等级（`user/__manager/config.ini` 等路径的 `security_level`）；设置为 listen（默认，UFW active 时问一次放行端口；systemd 主机缺 UFW 时可选按需安装并预写规则而不自动启用）或 tunnel（移除 `--listen`，保留非默认 `--port`，按变更重启）；**仅检查/放行 UFW 端口（不改自启服务）**；重启服务（同时支持 systemd 与 `/start.d` 后台进程）；**切换 Manager 安全等级（`normal` / `weak` / `strong`，`weak` 需二次确认，写前备份并可按需重启服务）**。未配自启服务时设置访问方式不报错中断，只按需更新防火墙并提示手动参数。
 
 ## `8` 开机自启
 
