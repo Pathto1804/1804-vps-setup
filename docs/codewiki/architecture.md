@@ -4,18 +4,21 @@
 
 ```
 /                     两个入口：00-tui.sh + comfyui-tui.sh；README.md；AGENTS.md；仓库配置
-docs/adr/             决策记录（0004 新增 ComfyUI 入口；0003 为基础上位决策）
+src/                  模块化源码（src/lib/ 共享原语 + src/00-tui/ + src/comfyui/）
+tests/                隔离打桩回归测试（tests/run.sh + tests/lib/ + tests/test_*.sh）
+docs/adr/             决策记录（0005 源码模块化与构建；0004 ComfyUI 入口；0003 单入口与原生状态）
 docs/codewiki/        基础脚本知识（本目录）
 docs/tutorial.md      基础脚本手动等价教程
 comfyui-docs/         ComfyUI 脚本知识（README + 两份指南 + codewiki/）
-tools/sync_check.sh   双入口一致性自检
+tools/build.sh        从 src/ 拼装生成根目录单文件入口（支持 --check 一致性校验）
+tools/sync_check.sh   双入口与构建产物一致性自检
 ```
 
-根目录允许放入口脚本 `00-tui.sh`、`comfyui-tui.sh`、`README.md`、`AGENTS.md` 和仓库配置；其余进 `docs/`、`comfyui-docs/`、`tools/`、`.omp/`。
+根目录允许放入口脚本 `00-tui.sh`、`comfyui-tui.sh`、`README.md`、`AGENTS.md` 和仓库配置；其余进 `src/`、`tests/`、`docs/`、`comfyui-docs/`、`tools/`、`.omp/`。
 
-## 核心机制：单文件 + 原生状态
+## 核心机制：单文件交付 + 源码模块化 + 原生状态
 
-`00-tui.sh` 与 `comfyui-tui.sh` 是**两个并列的用户入口**，各自单文件 raw 拉取即可运行：不 `source` 仓库内任何文件，所需函数全部内联。启动只做三件事——环境前置检查（root / TTY / 发行版）、状态探测、绘制主菜单；**不装软件、不初始化系统、不写文件**。`comfyui-tui.sh` 的机制见 [`comfyui-docs/codewiki/architecture.md`](../../comfyui-docs/codewiki/architecture.md)。
+`00-tui.sh` 与 `comfyui-tui.sh` 是**两个并列的用户入口**，交付侧各自单文件 raw 拉取即可运行：不 `source` 仓库内任何文件，所需函数全部内联。源码层按 [ADR-0005](../adr/0005-modular-source-build.md) 拆分为 `src/lib/` 与各自模块目录，由 [`tools/build.sh`](../../tools/build.sh) 拼装生成。启动只做三件事——环境前置检查（root / TTY / 发行版）、状态探测、绘制主菜单；**不装软件、不初始化系统、不写文件**。`comfyui-tui.sh` 的机制见 [`comfyui-docs/codewiki/architecture.md`](../../comfyui-docs/codewiki/architecture.md)。
 
 ```mermaid
 graph TD

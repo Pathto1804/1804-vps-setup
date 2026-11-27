@@ -1,8 +1,8 @@
 # 架构
 
-## 单文件入口
+## 单文件入口与源码模块化
 
-`comfyui-tui.sh` 是**第二个用户入口**，与 `00-tui.sh` 并列，不 `source` 仓库内任何文件。UI 原语、备份、探测函数全部内联；与基础脚本约 200 行重复是 raw 单文件形态的代价，不做共享库。
+`comfyui-tui.sh` 是**第二个用户入口**，与 `00-tui.sh` 并列，交付侧保持单文件自包含、不 `source` 仓库内任何文件。源码层按 [ADR-0005](../../docs/adr/0005-modular-source-build.md) 拆分为 `src/lib/`（共享 UI、屏幕契约、交互提示、备份原语）与 `src/comfyui/`（驱动、Python、ComfyUI、自启、终检、菜单），由 [`tools/build.sh`](../../tools/build.sh) 拼装生成根目录 `comfyui-tui.sh`。
 
 启动只做环境前置检查（root / TTY / x86_64 / Debian 系）、状态探测和主菜单绘制；**不装软件、不写文件**。所有写操作必须由用户在子菜单显式选择，或走菜单 `0` 标准部署。
 
@@ -66,4 +66,4 @@ graph TD
 
 ## 自动检查的边界
 
-`tools/sync_check.sh` 检查：两个入口存在、旧步骤脚本不复活、两个脚本都有 `shopt -s inherit_errexit`、不得引用私有状态文件、`COMFY_BASE` 与根 `README.md` 及 `comfyui-docs/README.md` 的 ComfyUI 包清单一致。它检查不到语法、ShellCheck、行为正确性与锁死链路；这些靠人工和真机验收。
+`tools/sync_check.sh` 检查：两个入口存在、旧步骤脚本不复活、两个脚本都有 `shopt -s inherit_errexit`、不得引用私有状态文件、`COMFY_BASE` 与根 `README.md` 及 `comfyui-docs/README.md` 的 ComfyUI 包清单一致，并调用 `tools/build.sh --check` 校验根目录交付文件与 `src/` 拼装产物字节一致。语法、ShellCheck 与隔离打桩行为测试（`tests/run.sh`）由本地校验及 `.github/workflows/ci.yml` 覆盖。

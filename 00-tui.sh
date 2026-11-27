@@ -33,6 +33,7 @@ ADMIN_USER=""
 AK_TMP=""
 declare -a AK_LINES=()
 
+trap 'if [[ -n "${AK_TMP}" ]]; then rm -f -- "${AK_TMP}"; fi' EXIT
 if [[ -t 1 ]]; then
   C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'; C_B=$'\e[1m'; C_D=$'\e[90m'; C_0=$'\e[0m'
 else
@@ -65,7 +66,6 @@ act() {
   return "${rc}"
 }
 trap 'err_trap "${LINENO}" "${BASH_COMMAND}"' ERR
-trap 'if [[ -n "${AK_TMP}" ]]; then rm -f -- "${AK_TMP}"; fi' EXIT
 
 # Ctrl-C：写操作可能只做了一半，提示按当前系统状态收敛
 ui_abort() {
@@ -111,116 +111,6 @@ require_distro() {
   local id
   id="$(. /etc/os-release 2>/dev/null && printf '%s' "${ID:-}")"
   [[ "${id}" == "debian" || "${id}" == "ubuntu" ]] || die "仅支持 Debian/Ubuntu，当前发行版：${id:-未知}"
-}
-
-# ============ 交互原语 ============
-# 提示后缀口径（四种，全脚本只允许这四种；中文圆括号，方括号只放输入类别/编号区间）：
-#   有默认值  （回车=默认 X）   可留空  （可留空=留空的后果）
-#   必填      （必填）          取消/返回（回车=取消）/（回车=返回）/（回车=暂不指定）
-ask_yesno() {
-  # 显示恒为小写 [y/n]，默认值写在圆括号里；输入大小写不限，只认 y/yes/n/no
-  local prompt="$1" def="${2:-n}" ans hint
-  case "${def}" in
-    y|Y) def=y; hint="是" ;;
-    *)   def=n; hint="否" ;;
-  esac
-  while :; do
-    read -rp "${prompt} [y/n]（回车=${hint}） " ans || return 1
-    ans="${ans:-${def}}"
-    case "${ans,,}" in
-      y|yes) return 0 ;;
-      n|no)  return 1 ;;
-      *)     printf '%s无效输入：请输入 y 或 n。%s\n' "${C_Y}" "${C_0}" >&2 ;;
-    esac
-  done
-}
-
-ask_input() {
-  local prompt="$1" v="$2" val
-  while :; do
-    read -rp "${prompt}（必填）: " val || die "输入中断"
-    if "${v}" "${val}"; then printf '%s' "${val}"; return 0; fi
-  done
-}
-
-ask_input_def() {
-  # ask_input_def <提示> <校验函数名> <默认值>——空输入取默认值
-  local prompt="$1" v="$2" def="$3" val
-  while :; do
-    read -rp "${prompt}（回车=默认 ${def}）: " val || die "输入中断"
-    val="${val:-${def}}"
-    if "${v}" "${val}"; then printf '%s' "${val}"; return 0; fi
-  done
-}
-
-ask_input_opt() {
-  # ask_input_opt <提示> <校验函数名> <留空含义>——空输入返回空串（不是默认值）
-  local prompt="$1" v="$2" blank="$3" val
-  while :; do
-    read -rp "${prompt}（可留空=${blank}）: " val || die "输入中断"
-    if "${v}" "${val}"; then printf '%s' "${val}"; return 0; fi
-  done
-}
-
-# ask_menu <提示> <最大编号> [零号含义]：结果写入全局 UI_REPLY（0..max）
-# 空回车 = 0（子菜单返回）；非法输入原地重问，不重绘菜单
-ask_menu() {
-  local prompt="$1" max="$2" zero="${3:-返回主菜单}" input
-  while :; do
-    read -rp "${prompt} [0-${max}]（回车=${zero}）: " input || die "输入中断"
-    input="${input:-0}"
-    if [[ "${input}" =~ ^[0-9]+$ ]] && (( input <= max )); then
-      # shellcheck disable=SC2034  # 由调用方读取
-      UI_REPLY="${input}"; return 0
-    fi
-    warn "无效输入：请输入 0-${max}"
-  done
-}
-
-# ============ 备份 ============
-backup_file() {
-  local path="$1" stamp dir newest base
-  [[ -e "${path}" ]] || { printf ''; return 0; }
-  base="$(basename "${path}")"
-  # 最新一份内容相同则不新建目录，只把它的时间戳刷新为当前时刻
-  # （不刷新会被后续备份挤成最旧，20 次后被裁剪逻辑删掉）
-  newest="$(find "${BK_ROOT}" -mindepth 1 -maxdepth 1 -type d \
-    -regextype posix-extended -regex '.*/[0-9]{8}-[0-9]{6}' 2>/dev/null | sort | tail -n 1)" || true
-  if [[ -n "${newest}" && -f "${newest}/${base}" ]] && cmp -s "${path}" "${newest}/${base}"; then
-    stamp="$(date +%Y%m%d-%H%M%S)"
-    dir="${BK_ROOT}/${stamp}"
-    if [[ "${dir}" != "${newest}" ]]; then
-      mkdir -p "${dir}"
-      mv "${newest}/${base}" "${dir}/${base}"
-      # 只在原目录已空时移除，绝不删掉同目录里的其他备份
-      rmdir -- "${newest}" 2>/dev/null || true
-    fi
-    bk_prune
-    printf '%s%s 内容未变，复用备份 %s/%s%s\n' "${C_G}" "${path}" "${BK_ROOT}" "${stamp}" "${C_0}" >&2
-    printf '%s' "${dir}"
-    return 0
-  fi
-  stamp="$(date +%Y%m%d-%H%M%S)"
-  dir="${BK_ROOT}/${stamp}"
-  mkdir -p "${dir}"
-  cp -a "${path}" "${dir}/"
-  bk_prune
-  printf '%s已备份 %s -> %s/%s\n' "${C_G}" "${path}" "${dir}" "${C_0}" >&2
-  printf '%s' "${dir}"
-}
-
-# bk_prune：只保留最近 BK_KEEP 份时间戳备份目录
-# 只删严格匹配 YYYYmmdd-HHMMSS 的目录，BK_ROOT 下的其他内容一律不碰
-bk_prune() {
-  local -a dirs=()
-  local i
-  [[ -d "${BK_ROOT}" ]] || return 0
-  mapfile -t dirs < <(find "${BK_ROOT}" -mindepth 1 -maxdepth 1 -type d \
-    -regextype posix-extended -regex '.*/[0-9]{8}-[0-9]{6}' 2>/dev/null | sort)
-  (( ${#dirs[@]} > BK_KEEP )) || return 0
-  for (( i = 0; i < ${#dirs[@]} - BK_KEEP; i++ )); do
-    rm -rf -- "${dirs[$i]}"
-  done
 }
 
 # ============ 公共校验器：合法返回 0，非法打印原因返回 1 ============
@@ -761,6 +651,116 @@ ui_item() { printf '  %s%s%s) %s\n' "${C_G}" "$1" "${C_0}" "$2"; }
 ui_quit() { printf '  %s0%s) 返回主菜单\n' "${C_R}" "${C_0}"; }
 ui_yes()  { printf '%s%s%s' "${C_G}" "$1" "${C_0}"; }
 ui_no()   { printf '%s%s%s' "${C_Y}" "$1" "${C_0}"; }
+
+# ============ 交互原语 ============
+# 提示后缀口径（四种，全脚本只允许这四种；中文圆括号，方括号只放输入类别/编号区间）：
+#   有默认值  （回车=默认 X）   可留空  （可留空=留空的后果）
+#   必填      （必填）          取消/返回（回车=取消）/（回车=返回）/（回车=暂不指定）
+ask_yesno() {
+  # 显示恒为小写 [y/n]，默认值写在圆括号里；输入大小写不限，只认 y/yes/n/no
+  local prompt="$1" def="${2:-n}" ans hint
+  case "${def}" in
+    y|Y) def=y; hint="是" ;;
+    *)   def=n; hint="否" ;;
+  esac
+  while :; do
+    read -rp "${prompt} [y/n]（回车=${hint}） " ans || return 1
+    ans="${ans:-${def}}"
+    case "${ans,,}" in
+      y|yes) return 0 ;;
+      n|no)  return 1 ;;
+      *)     printf '%s无效输入：请输入 y 或 n。%s\n' "${C_Y}" "${C_0}" >&2 ;;
+    esac
+  done
+}
+
+ask_input() {
+  local prompt="$1" v="$2" val
+  while :; do
+    read -rp "${prompt}（必填）: " val || die "输入中断"
+    if "${v}" "${val}"; then printf '%s' "${val}"; return 0; fi
+  done
+}
+
+ask_input_def() {
+  # ask_input_def <提示> <校验函数名> <默认值>——空输入取默认值
+  local prompt="$1" v="$2" def="$3" val
+  while :; do
+    read -rp "${prompt}（回车=默认 ${def}）: " val || die "输入中断"
+    val="${val:-${def}}"
+    if "${v}" "${val}"; then printf '%s' "${val}"; return 0; fi
+  done
+}
+
+ask_input_opt() {
+  # ask_input_opt <提示> <校验函数名> <留空含义>——空输入返回空串（不是默认值）
+  local prompt="$1" v="$2" blank="$3" val
+  while :; do
+    read -rp "${prompt}（可留空=${blank}）: " val || die "输入中断"
+    if "${v}" "${val}"; then printf '%s' "${val}"; return 0; fi
+  done
+}
+
+# ask_menu <提示> <最大编号> [零号含义]：结果写入全局 UI_REPLY（0..max）
+# 空回车 = 0（子菜单返回）；非法输入原地重问，不重绘菜单
+ask_menu() {
+  local prompt="$1" max="$2" zero="${3:-返回主菜单}" input
+  while :; do
+    read -rp "${prompt} [0-${max}]（回车=${zero}）: " input || die "输入中断"
+    input="${input:-0}"
+    if [[ "${input}" =~ ^[0-9]+$ ]] && (( input <= max )); then
+      # shellcheck disable=SC2034  # 由调用方读取
+      UI_REPLY="${input}"; return 0
+    fi
+    warn "无效输入：请输入 0-${max}"
+  done
+}
+
+# ============ 备份 ============
+backup_file() {
+  local path="$1" stamp dir newest base
+  [[ -e "${path}" ]] || { printf ''; return 0; }
+  base="$(basename "${path}")"
+  # 最新一份内容相同则不新建目录，只把它的时间戳刷新为当前时刻
+  # （不刷新会被后续备份挤成最旧，20 次后被裁剪逻辑删掉）
+  newest="$(find "${BK_ROOT}" -mindepth 1 -maxdepth 1 -type d \
+    -regextype posix-extended -regex '.*/[0-9]{8}-[0-9]{6}' 2>/dev/null | sort | tail -n 1)" || true
+  if [[ -n "${newest}" && -f "${newest}/${base}" ]] && cmp -s "${path}" "${newest}/${base}"; then
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    dir="${BK_ROOT}/${stamp}"
+    if [[ "${dir}" != "${newest}" ]]; then
+      mkdir -p "${dir}"
+      mv "${newest}/${base}" "${dir}/${base}"
+      # 只在原目录已空时移除，绝不删掉同目录里的其他备份
+      rmdir -- "${newest}" 2>/dev/null || true
+    fi
+    bk_prune
+    printf '%s%s 内容未变，复用备份 %s/%s%s\n' "${C_G}" "${path}" "${BK_ROOT}" "${stamp}" "${C_0}" >&2
+    printf '%s' "${dir}"
+    return 0
+  fi
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  dir="${BK_ROOT}/${stamp}"
+  mkdir -p "${dir}"
+  cp -a "${path}" "${dir}/"
+  bk_prune
+  printf '%s已备份 %s -> %s/%s\n' "${C_G}" "${path}" "${dir}" "${C_0}" >&2
+  printf '%s' "${dir}"
+}
+
+# bk_prune：只保留最近 BK_KEEP 份时间戳备份目录
+# 只删严格匹配 YYYYmmdd-HHMMSS 的目录，BK_ROOT 下的其他内容一律不碰
+bk_prune() {
+  local -a dirs=()
+  local i
+  [[ -d "${BK_ROOT}" ]] || return 0
+  mapfile -t dirs < <(find "${BK_ROOT}" -mindepth 1 -maxdepth 1 -type d \
+    -regextype posix-extended -regex '.*/[0-9]{8}-[0-9]{6}' 2>/dev/null | sort)
+  (( ${#dirs[@]} > BK_KEEP )) || return 0
+  for (( i = 0; i < ${#dirs[@]} - BK_KEEP; i++ )); do
+    rm -rf -- "${dirs[$i]}"
+  done
+}
 
 # ============ 模块 2：系统更新与基础工具 ============
 APT_UPDATED=0

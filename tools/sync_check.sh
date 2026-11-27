@@ -7,7 +7,9 @@
 #      comfyui-tui.sh 的 COMFY_BASE vs README 及 comfyui-docs/README 的 ComfyUI 包清单
 #   4. 项目私有状态文件不得复活：/root/.vps-init.conf、/root/.comfyui-tui.conf
 #   5. 两套文档树存在（docs/、comfyui-docs/）
+#   6. 源码构建一致性：tools/build.sh --check
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENTRY="00-tui.sh"
 COMFY_ENTRY="comfyui-tui.sh"
 RETIRED="01-base.sh 04-user.sh 05-ufw-ssh.sh 07-fail2ban.sh 08-swap.sh 09-bbr.sh 12-verify.sh"
@@ -86,4 +88,9 @@ for d in docs/codewiki comfyui-docs/codewiki; do
   [[ -d "${d}" ]] || { echo "❌ 缺少文档目录：${d}"; BAD+=1; }
 done
 
-[[ $BAD -eq 0 ]] && echo "=== 一致性 OK ===" || echo "=== ${BAD} 处仍有差异 ==="
+# ---- 6. 源码构建一致性 ----
+if [[ -f "${SCRIPT_DIR}/build.sh" ]]; then
+  bash "${SCRIPT_DIR}/build.sh" --check || BAD+=1
+fi
+
+[[ $BAD -eq 0 ]] && echo "=== 一致性 OK ===" || { echo "=== ${BAD} 处仍有差异 ==="; exit 1; }

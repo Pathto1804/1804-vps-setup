@@ -5,10 +5,12 @@
 ```bash
 bash -n 00-tui.sh && shellcheck -S warning 00-tui.sh
 bash -n comfyui-tui.sh && shellcheck -S warning comfyui-tui.sh
+bash tools/build.sh --check
 bash tools/sync_check.sh          # 必须输出「一致性 OK」
+bash tests/run.sh                 # 隔离打桩回归测试
 ```
 
-无构建、无测试框架、无 CI。本地只能做语法与 ShellCheck；行为必须在真机验收。
+修改逻辑请编辑 `src/` 下对应模块后运行 `bash tools/build.sh` 重新拼装生成根目录入口；`.github/workflows/ci.yml` 会在 PR 与 push 时自动执行全套检查，最终系统级行为仍在真机验收。
 
 ## 改动类型与必须动作
 
