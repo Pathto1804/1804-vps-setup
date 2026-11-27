@@ -4,10 +4,12 @@
 #   1. 两个入口存在；已退役步骤脚本与根目录其他 NN-*.sh 不得复活
 #   2. 关键行存在性：两个脚本都有 shopt -s inherit_errexit
 #   3. 包清单：00-tui.sh 的 BASE/TOOLS_EXTRA_DEFAULT vs README/教程；
-#      comfyui-tui.sh 的 COMFY_BASE vs README 的 ComfyUI 包清单
+#      comfyui-tui.sh 的 COMFY_BASE vs README 及 comfyui-docs/README 的 ComfyUI 包清单
 #   4. 项目私有状态文件不得复活：/root/.vps-init.conf、/root/.comfyui-tui.conf
 #   5. 两套文档树存在（docs/、comfyui-docs/）
+#   6. 源码构建一致性：tools/build.sh --check
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENTRY="00-tui.sh"
 COMFY_ENTRY="comfyui-tui.sh"
 RETIRED="01-base.sh 04-user.sh 05-ufw-ssh.sh 07-fail2ban.sh 08-swap.sh 09-bbr.sh 12-verify.sh"
@@ -44,6 +46,8 @@ EXPECT_ALL="$(printf '%s %s' "${BASE_LIST}" "${EXTRA_LIST}" | norm_list)"
 COMFY_LIST="$(sed -n 's/^COMFY_BASE="\(.*\)"$/\1/p' "${COMFY_ENTRY}" | norm_list)"
 README_COMFY_RAW="$(grep -o '`git curl[^`]*`' README.md || true)"
 README_COMFY="$(sed -n '1p' <<< "${README_COMFY_RAW}" | tr -d '`' | norm_list)"
+COMFY_DOC_RAW="$(grep -o '`git curl[^`]*`' comfyui-docs/README.md 2>/dev/null || true)"
+COMFY_DOC_LIST="$(sed -n '1p' <<< "${COMFY_DOC_RAW}" | tr -d '`' | norm_list)"
 
 check_list() {   # check_list <名称> <脚本侧> <文档侧>
   [[ "$2" == "$3" ]] && return 0
@@ -67,6 +71,7 @@ if [[ -z "${COMFY_LIST}" ]]; then
   BAD+=1
 else
   check_list "README ComfyUI 包清单" "${COMFY_LIST}" "${README_COMFY}"
+  check_list "comfyui-docs/README ComfyUI 包清单" "${COMFY_LIST}" "${COMFY_DOC_LIST}"
 fi
 
 # ---- 4. 项目私有状态文件不得复活 ----
@@ -83,4 +88,9 @@ for d in docs/codewiki comfyui-docs/codewiki; do
   [[ -d "${d}" ]] || { echo "❌ 缺少文档目录：${d}"; BAD+=1; }
 done
 
-[[ $BAD -eq 0 ]] && echo "=== 一致性 OK ===" || echo "=== ${BAD} 处仍有差异 ==="
+# ---- 6. 源码构建一致性 ----
+if [[ -f "${SCRIPT_DIR}/build.sh" ]]; then
+  bash "${SCRIPT_DIR}/build.sh" --check || BAD+=1
+fi
+
+[[ $BAD -eq 0 ]] && echo "=== 一致性 OK ===" || { echo "=== ${BAD} 处仍有差异 ==="; exit 1; }

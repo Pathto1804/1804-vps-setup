@@ -1,7 +1,7 @@
 # 0004 — ComfyUI 第二入口与双文档树
 
-- 状态：已接受（2026-11-27）
-- 关联：[ADR-0003](0003-single-tui-native-state.md)（基础脚本的单入口与原生状态）、[comfyui-docs/codewiki](../../comfyui-docs/codewiki/README.md)、[docs/codewiki/terms.md](../codewiki/terms.md)
+- 状态：已接受（2026-11-27）；源码组织与构建链路已按 [ADR-0005](0005-modular-source-build.md) 演进（业务边界与运行时约束不变）
+- 关联：[ADR-0003](0003-single-tui-native-state.md)（基础脚本的单入口与原生状态）、[ADR-0005](0005-modular-source-build.md)（源码模块化与单文件构建）、[comfyui-docs/codewiki](../../comfyui-docs/codewiki/README.md)、[docs/codewiki/terms.md](../codewiki/terms.md)
 
 ## 背景
 
