@@ -665,7 +665,7 @@ comfy_summary() {
 pip_version() {
   local pkg="$1"
   [[ -x "${ENV_PY}" ]] || return 0
-  run_with_timeout 20 env_py -c "import importlib.metadata as m; print(m.version('${pkg}'))" 2>/dev/null || true
+  HOME="${ROOT_HOME}" run_with_timeout 20 "${ENV_PY}" -c "import importlib.metadata as m; print(m.version('${pkg}'))" 2>/dev/null || true
 }
 
 manager_installed() {
