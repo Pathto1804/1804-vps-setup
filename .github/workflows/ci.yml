@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Syntax check
+        run: |
+          bash -n 00-tui.sh
+          bash -n comfyui-tui.sh
+          bash -n tools/build.sh
+          bash -n tools/sync_check.sh
+          bash -n tests/run.sh
+          for f in tests/lib/*.sh tests/test_*.sh; do bash -n "$f"; done
+
+      - name: ShellCheck
+        run: shellcheck -S warning 00-tui.sh comfyui-tui.sh tools/build.sh tools/sync_check.sh tests/run.sh tests/lib/*.sh tests/test_*.sh
+
+      - name: Sync check
+        run: bash tools/sync_check.sh
+
+      - name: Isolated stub tests
+        run: bash tests/run.sh
