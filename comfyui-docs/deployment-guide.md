@@ -109,8 +109,8 @@ sudo reboot
 如果安装了 `cuda-toolkit`（或覆盖了旧版 CUDA），重启登录后将通用软链 `/usr/local/cuda` 写入环境变量最前面，确保 `nvcc` 指向新版：
 
 ```
-echo 'export PATH=/usr/local/cuda/bin:$PATH' >> ~/.bashrc
-echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
+echo 'export PATH="/usr/local/cuda/bin${PATH:+:${PATH}}"' >> ~/.bashrc
+echo 'export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"' >> ~/.bashrc
 source ~/.bashrc
 
 nvidia-smi      # 确认驱动已升级且 CUDA Version >= 13.0
@@ -438,9 +438,9 @@ ls -d /start.d 2>/dev/null
 ```
 cat > /start.d/comfyui.sh << EOF
 #!/bin/bash
-export PATH="${HOME}/miniforge3/envs/comfyui/bin:\$PATH"
-cd ${HOME}/ComfyUI
-${HOME}/miniforge3/envs/comfyui/bin/python main.py --enable-manager --listen
+export PATH="${HOME}/miniforge3/envs/comfyui/bin:/usr/local/cuda/bin:\$PATH"
+cd "${HOME}/ComfyUI" || exit 1
+exec "${HOME}/miniforge3/envs/comfyui/bin/python" main.py --enable-manager --listen 0.0.0.0 --port 8188
 EOF
 
 chmod +x /start.d/comfyui.sh

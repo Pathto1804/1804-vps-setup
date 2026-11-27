@@ -32,13 +32,13 @@
 | 2 | 安装必要基础包前询问是否先更换系统 apt 源（LinuxMirrors：展示免责声明与命令，确认风险后可执行或跳过），然后 `apt-get update` + 安装 `COMFY_BASE` | 换源失败且拒绝继续、未执行换源且拒绝继续、用户拒绝安装或 apt 失败即中止 |
 | 3 | 检测 NVIDIA 硬件与驱动 | 驱动 CUDA <13.0 或不可用：安装/升级驱动后**停止流程等重启**；已满足 >=580 时明确说明仅满足最低要求（容器环境提示由宿主机提供；systemd 主机可选联网对比软件源并升级到最新稳定版）；拒绝安装不足驱动则中止；无 GPU 可进 CPU 测试模式 |
 | 4 | 安装 Miniforge（清华，GitHub 兜底；支持 `wget`/`curl` 自动回退；若检测到非 Miniforge 的其他 conda 如 Miniconda 则询问直接复用或另装 Miniforge）、写 `.condarc` 清华源、`conda init` | 下载/安装失败即中止 |
-| 5 | 创建 `comfyui` 环境（Python 3.13） | 创建失败即中止 |
+| 5 | 创建 `comfyui` 环境（Python 3.13；若探测到已有环境但低于 Python 3.12 则提示并可新建 3.13 环境） | 创建失败即中止 |
 | 6 | clone/pull ComfyUI（GitHub；失败可问 ghproxy；非 Git 且含 `main.py` 目录跳过 pull 并保留） | clone 失败即中止；pull 冲突只警告并继续 |
-| 7 | pip 阿里源；装 `torch torchvision`（GPU 用阿里 PyPI；CPU 用官方 CPU 索引）；装 requirements（`manager_requirements.txt` 存在才装） | 安装失败或 CUDA 主版本 !=13 即中止 |
-| 8 | `main.py --quick-test-for-ci [--enable-manager] [--cpu]`（检测到 `comfyui_manager` 才加 `--enable-manager`） | 非零即中止 |
-| 9 | 访问方式固定 `listen`；UFW active 时问一次并放行 8188；systemd 主机缺 UFW 时可选按需安装并预写 8188 规则（不自动启用），容器跳过 UFW | 拒绝放行只警告，流程继续 |
-| 10 | 写 systemd unit 或 `/start.d`，启用/后台拉起并等待 HTTP 60 秒 | 写 unit/启用失败即中止；无 systemd 且无 `/start.d` 只警告 |
-| 11 | 终检（红/黄/绿；容器缺 UFW / 无自启机制只警告不报红），打印公网 URL 与隧道命令 | 红项只警告，不自动回滚 |
+| 7 | pip 阿里源；装 `torch torchvision`（GPU 用阿里 PyPI；CPU 用官方 CPU 索引）；装 requirements（`manager_requirements.txt` 存在才装） | 安装失败、拒绝替换不匹配的旧版 PyTorch 或 CUDA 主版本 !=13 即中止 |
+| 8 | `main.py --quick-test-for-ci [--enable-manager] [--cpu]`（检测到 `comfyui_manager` 才加 `--enable-manager`；仅当 ComfyUI 进程已在运行时跳过） | 非零即中止 |
+| 9 | 默认访问方式 `listen`（若已有自启配置为 `tunnel` 模式则询问是否保留）；UFW active 时精确校验 `ALLOW`/`LIMIT` 并询问放行端口；systemd 主机缺 UFW 时可选按需安装并预写规则（不自动启用），容器跳过 UFW | 拒绝放行只警告，流程继续 |
+| 10 | 写 systemd unit 或 `/start.d`（注入虚拟环境与 `/usr/local/cuda/bin` 到 `PATH`；内容未变且服务已运行时幂等跳过重写与重启），启用/后台拉起（检测端口冲突）并等待 `/system_stats` HTTP 响应 60 秒 | 写 unit/启用失败即中止；无 systemd 且无 `/start.d` 只警告 |
+| 11 | 终检（红/黄/绿；校验 `/system_stats` 排除端口误占；容器缺 UFW / 无自启机制只警告不报红），打印公网 URL 与隧道命令，并询问是否清理下载缓存 | 红项只警告，不自动回滚 |
 
 ## `1` 环境与依赖检查
 
@@ -59,8 +59,8 @@
 | 项 | 行为 |
 |---|---|
 | `1` 查看状态 | `nvidia-smi` + `nvcc --version` |
-| `2` 安装 / 升级驱动 | 检查容器透传及非 dpkg（`.run`）风险；展示当前版本/包风味 vs 仓库候选稳定版；Ubuntu 可选系统源（>=580 分支）或 NVIDIA 官方源（`nvidia-open` / `cuda-drivers` / 指定 `>=580` 分支），Debian 直接官方源；已达标也可按意愿升级到最新稳定版；装完且有变更时提示必须重启 |
-| `3` 安装 / 升级 cuda-toolkit | 显示当前 `nvcc` 与 `apt-cache policy` 候选版本；装后把 `/usr/local/cuda` 写入 `.bashrc`（先备份，已存在则跳过） |
+| `2` 安装 / 升级驱动 | 检查容器透传及非 dpkg（`.run`）风险；展示当前版本/包风味 vs 仓库候选稳定版并校验候选版本 `>=580`；Ubuntu 可选系统源（>=580 分支）或 NVIDIA 官方源（`nvidia-open` / `cuda-drivers` / 指定 `>=580` 分支），Debian 直接官方源；已达标也可按意愿升级到最新稳定版；装完且有变更时提示必须重启 |
+| `3` 安装 / 升级 cuda-toolkit | 显示当前 `nvcc` 与 `apt-cache policy` 候选版本；装后把 `/usr/local/cuda` 安全写入 `.bashrc`（先备份，避免空 `LD_LIBRARY_PATH` 末尾冒号，已存在则跳过） |
 | `4` 重启 | 二次确认后 `systemctl reboot` / `reboot` |
 
 ## `4` Miniforge 与 Python 环境
@@ -77,12 +77,12 @@ clone/pull（非 Git 但含 `main.py` 目录保留代码）、配 pip 阿里源�
 
 ## `7` 远程访问与防火墙
 
-查看当前访问方式、公网 URL、SSH 隧道命令、UFW；设置为 listen（默认，UFW active 时问一次放行 8188；systemd 主机缺 UFW 时可选按需安装并预写 8188 规则而不自动启用）或 tunnel（移除 `--listen`，重启）；**仅检查/放行 UFW 8188 端口（不改自启服务）**；重启服务（同时支持 systemd 与 `/start.d` 后台进程）。未配自启服务时设置访问方式不报错中断，只按需更新防火墙并提示手动参数。
+查看当前访问方式（从有效启动行分词解析 `--listen` 地址，区分回环与公网）、公网 URL、SSH 隧道命令、UFW（`active` 精确匹配 `ALLOW`/`LIMIT`，`inactive` 回退 `ufw show added`）；设置为 listen（默认，UFW active 时问一次放行端口；systemd 主机缺 UFW 时可选按需安装并预写规则而不自动启用）或 tunnel（移除 `--listen`，保留非默认 `--port`，按变更重启）；**仅检查/放行 UFW 端口（不改自启服务）**；重启服务（同时支持 systemd 与 `/start.d` 后台进程）。未配自启服务时设置访问方式不报错中断，只按需更新防火墙并提示手动参数。
 
 ## `8` 开机自启
 
-查看 systemd/`/start.d` 状态与当前目标路径；写/更新自启（包含 `main.py`、按需 `--enable-manager` 与当前访问方式，并保留已有 unit/start.d 中的自定义启动参数）；单独写 systemd 服务或 `/start.d` 脚本；启动/停止/重启/状态（systemd 或 `/start.d` 后台进程）；切换 CPU/GPU 启动参数；删除自启（先备份，再 disable + rm）。
+查看 systemd/`/start.d` 状态（容器环境优先识别 `/start.d` 并校验可执行权限）与当前目标路径；写/更新自启（包含 `main.py`、按需 `--enable-manager`、当前访问方式及虚拟环境/CUDA `PATH`，保留已有 unit/start.d 中的自定义启动参数与端口，内容未变时幂等跳过）；单独写 systemd 服务或 `/start.d` 脚本；启动/停止/重启/状态（systemd 或 `/start.d` 后台进程，`/proc` 精确匹配当前 ComfyUI Python 进程）；切换 CPU/GPU 启动参数；删除自启（先备份，再 disable + rm）。
 
 ## `9` 终检与维护
 
-完整终检（GPU、Conda、env、ComfyUI、torch、manager、服务、端口、`ss` 缺失时回退 `/proc/net/tcp`、HTTP、UFW）；更新 ComfyUI + 依赖 + 重启；清理 pip/conda/journal 缓存（逐项确认，不强依赖脚本安装 Miniforge）；查看 journald 或 `/start.d/log`。
+完整终检（GPU、Conda、env、ComfyUI、torch、manager、服务、端口、`ss` 缺失时回退 `/proc/net/tcp`、`/system_stats` HTTP 校验、UFW）；更新 ComfyUI + 依赖 + 重启；清理 pip/conda/journal 缓存（逐项确认，不强依赖脚本安装 Miniforge）；查看 journald 或 `/start.d/log`。

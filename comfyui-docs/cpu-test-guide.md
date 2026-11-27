@@ -100,8 +100,8 @@ ls -d /start.d 2>/dev/null
   cat > /start.d/comfyui.sh << EOF
   #!/bin/bash
   export PATH="${HOME}/miniforge3/envs/comfyui/bin:\$PATH"
-  cd ${HOME}/ComfyUI
-  ${HOME}/miniforge3/envs/comfyui/bin/python main.py --cpu --enable-manager --listen
+  cd "${HOME}/ComfyUI" || exit 1
+  exec "${HOME}/miniforge3/envs/comfyui/bin/python" main.py --cpu --enable-manager --listen 0.0.0.0 --port 8188
   EOF
   chmod +x /start.d/comfyui.sh
   ```

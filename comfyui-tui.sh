@@ -6,8 +6,8 @@
 # 端口读 ss，防火墙读 ufw，ComfyUI 读 git；用户输入的偏好只存在于本次进程。
 
 set -euo pipefail
-# 命令替换默认不继承 errexit：不开这个，$(ask_input ...) 里的 die 只终止子 shell，
-# 空值会被照常写进系统配置。开启后交互读取遇 EOF/Ctrl-D 即中止脚本。（bash >= 4.4）
+# 命令替换默认不继承 errexit：开启后顶层命令替换继承 -e；
+# act 动作内临时关闭 -e，所有 $(ask_input*) 调用点均须显式接 || return 1 拦截输入中断。（bash >= 4.4）
 shopt -s inherit_errexit
 
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
@@ -52,12 +52,14 @@ PY_VER="3.13"
 CONDA_ENV_NAME="comfyui"
 CUSTOM_TARGET_SET=0
 DRIVER_CHANGED=0
+AUTOSTART_CHANGED=0
 TMPD=""
 UI_REPLY=""
 MAIN_REPLY=""
 DW=0
 declare -a COMFY_ARGS=()
 declare -a COMFY_EXTRA_ARGS=()
+declare -a CMD_WORDS=()
 
 if [[ -t 1 ]]; then
   C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'; C_B=$'\e[1m'; C_D=$'\e[90m'; C_0=$'\e[0m'
@@ -162,7 +164,7 @@ ask_yesno() {
     case "${ans,,}" in
       y|yes) return 0 ;;
       n|no)  return 1 ;;
-      *)     printf '%s无效输入：请输入 y 或 n。\n' "${C_Y}" >&2 ;;
+      *)     printf '%s无效输入：请输入 y 或 n。%s\n' "${C_Y}" "${C_0}" >&2 ;;
     esac
   done
 }
@@ -201,7 +203,11 @@ v_nonempty() { [[ -n "$1" ]] || { printf '不能为空\n' >&2; return 1; }; }
 v_pyver() { [[ "$1" =~ ^3\.(12|13)$ ]] || { printf '仅支持 3.12 / 3.13\n' >&2; return 1; }; }
 v_action() { [[ "$1" =~ ^(start|stop|restart|status)$ ]] || { printf '仅支持 start/stop/restart/status\n' >&2; return 1; }; }
 v_dir() { [[ -d "$1" ]] || { printf '目录不存在：%s\n' "$1" >&2; return 1; }; }
-v_pybin() { [[ -x "$1" ]] && "$1" --version >/dev/null 2>&1 || { printf '可执行 Python 无效：%s\n' "$1" >&2; return 1; }; }
+v_pybin() {
+  if [[ -x "$1" ]] && "$1" --version >/dev/null 2>&1; then return 0; fi
+  printf '可执行 Python 无效：%s\n' "$1" >&2
+  return 1
+}
 v_comfy_dir() { [[ -f "$1/main.py" ]] || { printf '未在该目录找到 main.py：%s\n' "$1" >&2; return 1; }; }
 
 # 显示宽度：CJK/全角按 2 列
@@ -469,15 +475,25 @@ port_listening() {
 
 fw_installed() { command -v ufw >/dev/null 2>&1; }
 fw_raw() { ufw status 2>/dev/null || true; }
+fw_added() { ufw show added 2>/dev/null || true; }
 fw_active() {
   local out
   out="$(fw_raw)"
   [[ "${out}" == Status:\ active* ]]
 }
 fw_has_port() {
-  local out
+  local out added
+  fw_installed || return 1
   out="$(fw_raw)"
-  [[ "${out}" == *"${PORT}/tcp"* ]]
+  if [[ "${out}" == Status:\ active* ]]; then
+    awk -v p="${PORT}" '
+      ($1 == p "/tcp" || $1 == p) && ($2 == "ALLOW" || $2 == "LIMIT") { found=1; exit }
+      END { exit !found }
+    ' <<< "${out}"
+  else
+    added="$(fw_added)"
+    grep -qE "^ufw (allow|limit) (${PORT}(/tcp)?|from .* to any port ${PORT}( proto tcp)?)\$" <<< "${added}"
+  fi
 }
 
 systemd_present() {
@@ -486,7 +502,7 @@ systemd_present() {
 }
 unit_exists() { [[ -f "${UNIT_FILE}" ]]; }
 startd_exists() { [[ -d "${STARTD_DIR}" ]]; }
-startd_configured() { startd_exists && [[ -f "${STARTD_FILE}" ]]; }
+startd_configured() { startd_exists && [[ -x "${STARTD_FILE}" ]]; }
 service_active() {
   if unit_exists && systemd_present; then
     [[ "$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || true)" == "active" ]]
@@ -502,55 +518,185 @@ service_enabled() {
   fi
 }
 
+tokenize_cmdline() {
+  local s="$1" i=0 len="${#1}" ch tok="" in_sq=0 in_dq=0 has_tok=0
+  CMD_WORDS=()
+  while (( i < len )); do
+    ch="${s:i:1}"
+    if (( in_sq )); then
+      if [[ "${ch}" == "'" ]]; then in_sq=0; else tok+="${ch}"; fi
+    elif (( in_dq )); then
+      if [[ "${ch}" == '"' ]]; then
+        in_dq=0
+      elif [[ "${ch}" == '\' ]] && (( i + 1 < len )); then
+        i=$((i+1)); tok+="${s:i:1}"
+      else
+        tok+="${ch}"
+      fi
+    else
+      case "${ch}" in
+        [[:space:]])
+          if (( has_tok )); then CMD_WORDS+=("${tok}"); tok=""; has_tok=0; fi
+          ;;
+        "'") in_sq=1; has_tok=1 ;;
+        '"') in_dq=1; has_tok=1 ;;
+        '\')
+          has_tok=1
+          if (( i + 1 < len )); then i=$((i+1)); tok+="${s:i:1}"; fi
+          ;;
+        *) tok+="${ch}"; has_tok=1 ;;
+      esac
+    fi
+    i=$((i+1))
+  done
+  if (( has_tok )); then CMD_WORDS+=("${tok}"); fi
+}
+
 config_file() {
-  if [[ -f "${UNIT_FILE}" ]]; then printf '%s' "${UNIT_FILE}"
+  if systemd_present && [[ -f "${UNIT_FILE}" ]]; then printf '%s' "${UNIT_FILE}"
   elif [[ -f "${STARTD_FILE}" ]]; then printf '%s' "${STARTD_FILE}"
+  elif [[ -f "${UNIT_FILE}" ]]; then printf '%s' "${UNIT_FILE}"
   fi
 }
+
+config_exec_line() {
+  local f="${1:-$(config_file)}"
+  [[ -n "${f}" && -f "${f}" ]] || return 0
+  if [[ "${f}" == "${UNIT_FILE}" ]]; then
+    awk '/^[[:space:]]*ExecStart=/{sub(/^[[:space:]]*ExecStart=[[:space:]]*/, ""); print; exit}' "${f}" 2>/dev/null || true
+  else
+    awk '
+      /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+      /^[[:space:]]*exec[[:space:]]+/ { sub(/^[[:space:]]*exec[[:space:]]+/, ""); print; exit }
+      /main\.py([[:space:]]|$)/ { sub(/^[[:space:]]+/, ""); print; exit }
+    ' "${f}" 2>/dev/null || true
+  fi
+}
+
+is_loopback_addr() {
+  case "$1" in
+    127.0.0.1|::1|localhost|127.0.0.1,::1|::1,127.0.0.1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 current_access_mode() {
-  local f
+  local f line idx=1 n tok next_tok
   f="$(config_file)"
   if [[ -z "${f}" ]]; then printf 'listen'; return 0; fi
-  if grep -q -- '--listen' "${f}"; then printf 'listen'; else printf 'tunnel'; fi
+  line="$(config_exec_line "${f}")"
+  if [[ -z "${line}" ]]; then printf 'tunnel'; return 0; fi
+  tokenize_cmdline "${line}"
+  n="${#CMD_WORDS[@]}"
+  while (( idx < n )); do
+    tok="${CMD_WORDS[$idx]}"
+    case "${tok}" in
+      --listen=*)
+        if is_loopback_addr "${tok#--listen=}"; then printf 'tunnel'; else printf 'listen'; fi
+        return 0
+        ;;
+      --listen)
+        if (( idx + 1 < n )) && [[ "${CMD_WORDS[$((idx+1))]}" != -* ]]; then
+          next_tok="${CMD_WORDS[$((idx+1))]}"
+          if is_loopback_addr "${next_tok}"; then printf 'tunnel'; else printf 'listen'; fi
+        else
+          printf 'listen'
+        fi
+        return 0
+        ;;
+    esac
+    idx=$((idx+1))
+  done
+  printf 'tunnel'
 }
+
 config_has_cpu() {
-  local f
+  local f line idx=1 tok
   f="$(config_file)"
-  [[ -n "${f}" ]] && grep -q -- '--cpu' "${f}"
+  [[ -n "${f}" ]] || return 1
+  line="$(config_exec_line "${f}")"
+  [[ -n "${line}" ]] || return 1
+  tokenize_cmdline "${line}"
+  while (( idx < ${#CMD_WORDS[@]} )); do
+    tok="${CMD_WORDS[$idx]}"
+    [[ "${tok}" == "--cpu" ]] && return 0
+    idx=$((idx+1))
+  done
+  return 1
+}
+
+parse_config_port() {
+  local f line idx=1 n tok val=""
+  f="$(config_file)"
+  [[ -n "${f}" ]] || return 0
+  line="$(config_exec_line "${f}")"
+  [[ -n "${line}" ]] || return 0
+  tokenize_cmdline "${line}"
+  n="${#CMD_WORDS[@]}"
+  while (( idx < n )); do
+    tok="${CMD_WORDS[$idx]}"
+    case "${tok}" in
+      --port=*) val="${tok#--port=}"; break ;;
+      --port)
+        if (( idx + 1 < n )) && [[ "${CMD_WORDS[$((idx+1))]}" != -* ]]; then
+          val="${CMD_WORDS[$((idx+1))]}"
+        fi
+        break
+        ;;
+    esac
+    idx=$((idx+1))
+  done
+  if [[ "${val}" =~ ^[0-9]+$ ]] && (( 10#${val} >= 1 && 10#${val} <= 65535 )); then
+    printf '%s' "$((10#${val}))"
+  fi
 }
 
 sync_env_bin() {
   ENV_BIN="$(dirname "${ENV_PY}")"
   if [[ "${ENV_PY}" == */envs/*/bin/python ]]; then
     ENV_DIR="${ENV_PY%/bin/python}"
+    CONDA_ENV_NAME="$(basename "${ENV_DIR}")"
   fi
 }
 
 parse_unit_workdir() {
   local line
   [[ -f "${UNIT_FILE}" ]] || return 0
-  line="$(awk -F= '/^WorkingDirectory=/{sub(/^[[:space:]]+/, "", $2); print $2; exit}' "${UNIT_FILE}" 2>/dev/null || true)"
+  line="$(awk '/^[[:space:]]*WorkingDirectory=/{sub(/^[[:space:]]*WorkingDirectory=[[:space:]]*/, ""); print; exit}' "${UNIT_FILE}" 2>/dev/null || true)"
+  line="${line#\"}"
+  line="${line%\"}"
   printf '%s' "${line}"
 }
 
 parse_startd_workdir() {
   local line
   [[ -f "${STARTD_FILE}" ]] || return 0
-  line="$(sed -n 's/^cd "\([^"]*\)".*/\1/p' "${STARTD_FILE}" 2>/dev/null || true)"
-  printf '%s' "${line%%$'\n'*}"
+  line="$(awk '
+    /^[[:space:]]*cd[[:space:]]+/ {
+      sub(/^[[:space:]]*cd[[:space:]]+/, "")
+      sub(/[[:space:]]*(\|\||&&|;).*$/, "")
+      sub(/[[:space:]]+$/, "")
+      if ( (substr($0,1,1)=="\"" && substr($0,length($0),1)=="\"") ||
+           (substr($0,1,1)=="\x27" && substr($0,length($0),1)=="\x27") ) {
+        $0 = substr($0, 2, length($0)-2)
+      }
+      print
+      exit
+    }
+  ' "${STARTD_FILE}" 2>/dev/null || true)"
+  printf '%s' "${line}"
 }
 
 parse_config_python() {
-  local line py=""
-  if [[ -f "${UNIT_FILE}" ]]; then
-    line="$(awk -F= '/^ExecStart=/{sub(/^[[:space:]]+/, "", $2); print $2; exit}' "${UNIT_FILE}" 2>/dev/null || true)"
-    py="${line%% *}"
-  elif [[ -f "${STARTD_FILE}" ]]; then
-    line="$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "${STARTD_FILE}" 2>/dev/null || true)"
-    py="${line%%$'\n'*}"
+  local f line py=""
+  f="$(config_file)"
+  [[ -n "${f}" ]] || return 0
+  line="$(config_exec_line "${f}")"
+  [[ -n "${line}" ]] || return 0
+  tokenize_cmdline "${line}"
+  if (( ${#CMD_WORDS[@]} > 0 )); then
+    py="${CMD_WORDS[0]}"
   fi
-  py="${py#\"}"
-  py="${py%\"}"
   if [[ -n "${py}" && -x "${py}" ]]; then
     printf '%s' "${py}"
   fi
@@ -573,12 +719,19 @@ discover_conda_bin() {
 }
 
 discover_native_context() {
-  local d py cbin envline
+  local d py cbin envline cfg_port
+  cfg_port="$(parse_config_port || true)"
+  [[ -n "${cfg_port}" ]] && PORT="${cfg_port}"
   (( CUSTOM_TARGET_SET )) && return 0
 
   # 1. ComfyUI 目录探测：已配置服务 -> 默认路径 -> 常见数据盘路径
-  d="$(parse_unit_workdir)"
-  [[ -n "${d}" && -d "${d}" ]] || d="$(parse_startd_workdir)"
+  if systemd_present; then
+    d="$(parse_unit_workdir)"
+    [[ -n "${d}" && -d "${d}" ]] || d="$(parse_startd_workdir)"
+  else
+    d="$(parse_startd_workdir)"
+    [[ -n "${d}" && -d "${d}" ]] || d="$(parse_unit_workdir)"
+  fi
   if [[ -n "${d}" && -d "${d}" ]]; then
     COMFY_DIR="${d}"
   elif [[ -f "${ROOT_HOME}/ComfyUI/main.py" || -d "${ROOT_HOME}/ComfyUI/.git" ]]; then
@@ -816,13 +969,25 @@ nvidia_repo_setup() {
 v_driver_branch() { [[ "$1" =~ ^[0-9]{3}$ ]] || { printf '请输入 3 位数字大版本号（如 580、590）\n' >&2; return 1; }; }
 v_choice_three() { [[ "$1" =~ ^(1|2|3)$ ]] || { printf '请输入 1、2 或 3\n' >&2; return 1; }; }
 
+pkg_ver_major() {
+  local v="${1#*:}"
+  v="${v%%.*}"
+  v="${v%%-*}"
+  printf '%s' "${v}"
+}
+
 driver_apt_install_pkg() {
-  local pkg="$1" pol inst cand
+  local pkg="$1" pol inst cand cand_major
   pol="$(apt_pkg_policy "${pkg}")"
   inst="${pol%%|*}"
   cand="${pol#*|}"
   if [[ -z "${cand}" ]]; then
     die_action "软件源中未找到 ${pkg}（检查分支号或 apt 源）"
+    return 1
+  fi
+  cand_major="$(pkg_ver_major "${cand}")"
+  if [[ "${cand_major}" =~ ^[0-9]+$ ]] && (( 10#${cand_major} < 580 )); then
+    die_action "软件源中 ${pkg} 最高候选为 ${cand}（低于 580 / CUDA 13 门槛；旧发行版如 Ubuntu 20.04 / Debian 11 请升级到 Ubuntu 22.04+ 或 Debian 12+）"
     return 1
   fi
   if [[ -n "${inst}" && "${inst}" == "${cand}" ]]; then
@@ -993,7 +1158,11 @@ cuda_toolkit_install() {
   local bashrc="${ROOT_HOME}/.bashrc"
   backup_file "${bashrc}" >/dev/null || true
   if ! grep -qF '/usr/local/cuda/bin' "${bashrc}" 2>/dev/null; then
-    printf '\nexport PATH=/usr/local/cuda/bin:$PATH\nexport LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH\n' >> "${bashrc}" || {
+    # shellcheck disable=SC2016
+    {
+      printf '\nexport PATH="/usr/local/cuda/bin${PATH:+:${PATH}}"\n'
+      printf 'export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"\n'
+    } >> "${bashrc}" || {
       die_action "写入 ${bashrc} 失败"; return 1;
     }
   fi
@@ -1181,15 +1350,40 @@ conda_update_action() {
   return 0
 }
 
+env_py_minor_ok() {
+  env_ok || return 1
+  env_py -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1
+}
+
 env_create() {
   local ver="${1:-${PY_VER}}"
   if ! conda_ok; then
+    if env_ok && env_py_minor_ok; then
+      log "Python 环境已存在（已满足）：$(env_python_version)"
+      return 0
+    fi
     die_action "未检测到 conda/Miniforge，请先安装或切换 Python 环境"
     return 1
   fi
   if env_ok; then
-    log "Python 环境已存在（已满足）：$(env_python_version)"
-    return 0
+    if env_py_minor_ok; then
+      log "Python 环境已存在（已满足）：$(env_python_version)"
+      return 0
+    fi
+    warn "当前探测到的 Python 版本较低：$(env_python_version)（${ENV_PY}），推荐使用 Python 3.12+"
+    if ask_yesno "仍保留当前 Python 环境继续？（选 n 则新建 conda 环境 comfyui Python ${ver}）" n; then
+      return 0
+    fi
+    CONDA_ENV_NAME="comfyui"
+    ENV_DIR="${MINIFORGE_DIR}/envs/${CONDA_ENV_NAME}"
+    ENV_PY="${ENV_DIR}/bin/python"
+    sync_env_bin
+    CUSTOM_TARGET_SET=1
+    if [[ -d "${ENV_DIR}" ]] && ! env_py_minor_ok; then
+      HOME="${ROOT_HOME}" "${CONDA_BIN}" env remove -n "${CONDA_ENV_NAME}" -y || {
+        die_action "清理旧 ${CONDA_ENV_NAME} 环境失败"; return 1;
+      }
+    fi
   fi
   local runner="${MAMBA_BIN}"
   [[ -x "${runner}" ]] || runner="${CONDA_BIN}"
@@ -1209,23 +1403,28 @@ env_create() {
 }
 
 env_recreate() {
-  local ver
+  local ver target_dir
   if ! conda_ok; then
     die_action "未检测到 conda/Miniforge，无法重建 conda 环境"
     return 1
   fi
-  warn "重建会删除 conda 环境 ${CONDA_ENV_NAME}（模型与 ComfyUI 代码不受影响）"
+  target_dir="${MINIFORGE_DIR}/envs/${CONDA_ENV_NAME}"
+  warn "重建会删除 conda 环境 ${CONDA_ENV_NAME}（${target_dir}，模型与 ComfyUI 代码不受影响）"
   if ! ask_yesno "确认重建 ${CONDA_ENV_NAME} 环境？" n; then
     log "已取消重建"
     return 0
   fi
   ver="$(ask_input_def "Python 版本" v_pyver "${PY_VER}")" || return 1
-  if env_ok; then
+  if [[ -d "${target_dir}" ]]; then
     if ! HOME="${ROOT_HOME}" "${CONDA_BIN}" env remove -n "${CONDA_ENV_NAME}" -y; then
       die_action "删除环境失败"
       return 1
     fi
   fi
+  ENV_DIR="${target_dir}"
+  ENV_PY="${ENV_DIR}/bin/python"
+  sync_env_bin
+  CUSTOM_TARGET_SET=1
   env_create "${ver}" || return 1
   return 0
 }
@@ -1260,10 +1459,6 @@ select_python_target() {
   fi
   ENV_PY="${custom}"
   sync_env_bin
-  if [[ "${ENV_PY}" == */envs/*/bin/python ]]; then
-    local env_base="${ENV_PY%/bin/python}"
-    CONDA_ENV_NAME="$(basename "${env_base}")"
-  fi
   CUSTOM_TARGET_SET=1
   log "本次会话已切换 Python：${ENV_PY}（$(env_python_version)）"
   return 0
@@ -1385,7 +1580,7 @@ comfy_clone_or_pull() {
 torch_report() {
   local out
   if ! env_ok; then return 1; fi
-  out="$(env_py -c 'import torch, torchvision; print(torch.__version__); print(torch.version.cuda or ""); print(torch.cuda.is_available())' 2>/dev/null || true)"
+  out="$(HOME="${ROOT_HOME}" run_with_timeout 30 "${ENV_PY}" -c 'import torch, torchvision; print(torch.__version__); print(torch.version.cuda or ""); print(torch.cuda.is_available())' 2>/dev/null || true)"
   printf '%s' "${out}"
 }
 
@@ -1466,7 +1661,8 @@ torch_install() {
     fi
     warn "现有 PyTorch 与目标模式不匹配：${ver} / CUDA ${cuda:-无} / avail=${avail:-未知}"
     if ! ask_yesno "卸载旧版并重新安装 PyTorch？" y; then
-      return 0
+      die_action "保留不匹配的 PyTorch（${ver}），已中止当前步骤"
+      return 1
     fi
     log "卸载旧 torch / torchvision 后重装"
     env_py -m pip uninstall -y torch torchvision >/dev/null 2>&1 || true
@@ -1566,12 +1762,12 @@ smoke_test() {
     warn "未检测到 comfyui_manager，冒烟测试不带 --enable-manager"
   fi
   if (( CPU_MODE )); then args+=(--cpu); fi
-  if service_active || port_listening; then
-    log "服务或 8188 已在运行，跳过前台冒烟测试（终检会验证 HTTP）"
+  if service_active || [[ -n "$(comfy_running_pids)" ]]; then
+    log "ComfyUI 已在运行，跳过前台冒烟测试（终检会验证 HTTP）"
     return 0
   fi
   log "冒烟测试：ComfyUI 启动检查"
-  if ! ( cd "${COMFY_DIR}" && HOME="${ROOT_HOME}" timeout 180 "${ENV_PY}" "${args[@]}" ); then
+  if ! ( cd "${COMFY_DIR}" && HOME="${ROOT_HOME}" run_with_timeout 180 "${ENV_PY}" "${args[@]}" ); then
     die_action "ComfyUI 冒烟测试失败（查看上方报错）"
     return 1
   fi
@@ -1623,29 +1819,73 @@ ensure_fw_8188() {
 }
 
 # ============ 开机自启 ============
+systemd_quote_arg() {
+  local s="$1"
+  if [[ "${s}" =~ ^[A-Za-z0-9_./:=+@-]+$ ]]; then
+    printf '%s' "${s}"
+  else
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '"%s"' "${s}"
+  fi
+}
+
+shell_quote_arg() {
+  local s="$1"
+  if [[ "${s}" =~ ^[A-Za-z0-9_./:=+@-]+$ ]]; then
+    printf '%s' "${s}"
+  else
+    printf '%q' "${s}"
+  fi
+}
+
+format_systemd_cmd() {
+  local out="" arg first=1
+  for arg in "$@"; do
+    if (( first )); then
+      out="$(systemd_quote_arg "${arg}")"
+      first=0
+    else
+      out+=" $(systemd_quote_arg "${arg}")"
+    fi
+  done
+  printf '%s' "${out}"
+}
+
+format_shell_args() {
+  local out="" arg first=1
+  for arg in "$@"; do
+    if (( first )); then
+      out="$(shell_quote_arg "${arg}")"
+      first=0
+    else
+      out+=" $(shell_quote_arg "${arg}")"
+    fi
+  done
+  printf '%s' "${out}"
+}
+
 extract_existing_extra_args() {
-  local f line tok skip_next=0
-  local -a words=()
+  local f line idx=1 n tok
   COMFY_EXTRA_ARGS=()
   f="$(config_file)"
   [[ -n "${f}" ]] || return 0
-  if [[ "${f}" == "${UNIT_FILE}" ]]; then
-    line="$(awk -F= '/^ExecStart=/{sub(/^[[:space:]]+/, "", $2); print $2; exit}' "${f}" 2>/dev/null || true)"
-  else
-    line="$(awk '/^exec /{sub(/^exec /, ""); print; exit}' "${f}" 2>/dev/null || true)"
-  fi
+  line="$(config_exec_line "${f}")"
   [[ -n "${line}" ]] || return 0
-  read -r -a words <<< "${line}"
-  local i=0
-  for tok in "${words[@]}"; do
-    if (( i == 0 )); then i=1; continue; fi
-    if (( skip_next )); then skip_next=0; continue; fi
+  tokenize_cmdline "${line}"
+  n="${#CMD_WORDS[@]}"
+  while (( idx < n )); do
+    tok="${CMD_WORDS[$idx]}"
     case "${tok}" in
-      main.py|*/main.py|--enable-manager|--cpu) continue ;;
-      --listen|--port) skip_next=1; continue ;;
-      --listen=*|--port=*) continue ;;
+      main.py|*/main.py|--enable-manager|--cpu|--listen=*|--port=*) ;;
+      --listen|--port)
+        if (( idx + 1 < n )) && [[ "${CMD_WORDS[$((idx+1))]}" != -* ]]; then
+          idx=$((idx+1))
+        fi
+        ;;
       *) COMFY_EXTRA_ARGS+=("${tok}") ;;
     esac
+    idx=$((idx+1))
   done
 }
 
@@ -1659,6 +1899,8 @@ build_comfy_args() {
   fi
   if [[ "${ACCESS_MODE}" == "listen" ]]; then
     COMFY_ARGS+=(--listen 0.0.0.0 --port "${PORT}")
+  elif (( PORT != 8188 )); then
+    COMFY_ARGS+=(--port "${PORT}")
   fi
   if (( CPU_MODE )); then
     COMFY_ARGS+=(--cpu)
@@ -1685,6 +1927,8 @@ ensure_comfy_args() {
 }
 
 write_systemd_unit() {
+  local tmp_unit exec_cmd workdir_q env_path_q
+  AUTOSTART_CHANGED=0
   if ! systemd_present; then
     die_action "当前 PID 1 不是 systemd，不能写 systemd 服务"
     return 1
@@ -1694,8 +1938,11 @@ write_systemd_unit() {
     return 1
   fi
   ensure_comfy_args
-  backup_file "${UNIT_FILE}" >/dev/null || true
-  cat > "${UNIT_FILE}" <<EOF
+  exec_cmd="$(format_systemd_cmd "${ENV_PY}" "${COMFY_ARGS[@]}")"
+  workdir_q="$(systemd_quote_arg "${COMFY_DIR}")"
+  env_path_q="$(systemd_quote_arg "PATH=${ENV_BIN}:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")"
+  tmp_unit="${TMPD}/comfyui.service.new"
+  cat > "${tmp_unit}" <<EOF
 [Unit]
 Description=ComfyUI Service
 After=network-online.target
@@ -1704,15 +1951,34 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=${COMFY_DIR}
-ExecStart=${ENV_PY} ${COMFY_ARGS[*]}
+WorkingDirectory=${workdir_q}
+ExecStart=${exec_cmd}
 Restart=always
 RestartSec=10
+Environment=${env_path_q}
 Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
 EOF
+  if [[ -f "${UNIT_FILE}" ]] && cmp -s "${tmp_unit}" "${UNIT_FILE}"; then
+    rm -f -- "${tmp_unit}"
+    if ! service_enabled; then
+      systemctl enable "${SERVICE_NAME}" || { die_action "systemctl enable ${SERVICE_NAME} 失败"; return 1; }
+    fi
+    if service_active; then
+      log "systemd 服务配置未变化且已在运行（已满足）"
+      return 0
+    fi
+    if ! systemctl start "${SERVICE_NAME}"; then
+      die_action "systemctl start ${SERVICE_NAME} 失败"
+      return 1
+    fi
+    return 0
+  fi
+  backup_file "${UNIT_FILE}" >/dev/null || true
+  mv -f -- "${tmp_unit}" "${UNIT_FILE}" || { die_action "写入 ${UNIT_FILE} 失败"; return 1; }
+  AUTOSTART_CHANGED=1
   if ! systemctl daemon-reload; then
     die_action "systemctl daemon-reload 失败"
     return 1
@@ -1729,6 +1995,8 @@ EOF
 }
 
 write_startd_script() {
+  local tmp_script args_str
+  AUTOSTART_CHANGED=0
   if ! startd_exists; then
     die_action "未检测到 ${STARTD_DIR}，不能写容器自启脚本"
     return 1
@@ -1738,31 +2006,54 @@ write_startd_script() {
     return 1
   fi
   ensure_comfy_args
-  backup_file "${STARTD_FILE}" >/dev/null || true
-  cat > "${STARTD_FILE}" <<EOF
+  args_str="$(format_shell_args "${COMFY_ARGS[@]}")"
+  tmp_script="${TMPD}/comfyui.sh.new"
+  cat > "${tmp_script}" <<EOF
 #!/bin/bash
-export PATH="${ENV_BIN}:\$PATH"
+export PATH="${ENV_BIN}:/usr/local/cuda/bin:\$PATH"
 cd "${COMFY_DIR}" || exit 1
-exec "${ENV_PY}" ${COMFY_ARGS[*]}
+exec "${ENV_PY}" ${args_str}
 EOF
+  if [[ -f "${STARTD_FILE}" && -x "${STARTD_FILE}" ]] && cmp -s "${tmp_script}" "${STARTD_FILE}"; then
+    rm -f -- "${tmp_script}"
+    log "${STARTD_FILE} 配置未变化（已满足）"
+    return 0
+  fi
+  backup_file "${STARTD_FILE}" >/dev/null || true
+  mv -f -- "${tmp_script}" "${STARTD_FILE}" || { die_action "写入 ${STARTD_FILE} 失败"; return 1; }
   if ! chmod +x "${STARTD_FILE}"; then
     die_action "chmod +x ${STARTD_FILE} 失败"
     return 1
   fi
+  AUTOSTART_CHANGED=1
   log "已写入 ${STARTD_FILE}；容器平台重启实例后生效"
   return 0
 }
 
 comfy_running_pids() {
-  local p cmd cwd
+  local p cwd comfy_real exe_base arg matched
+  local -a argv=()
+  comfy_real="$(readlink -f "${COMFY_DIR}" 2>/dev/null || printf '%s' "${COMFY_DIR}")"
   for p in /proc/[0-9]*; do
     [[ "${p##*/}" != "$$" && -r "${p}/cmdline" ]] || continue
-    cmd="$(tr '\0' ' ' < "${p}/cmdline" 2>/dev/null || true)"
-    [[ "${cmd}" == *"main.py"* ]] || continue
+    argv=()
+    mapfile -d '' -t argv < "${p}/cmdline" 2>/dev/null || continue
+    (( ${#argv[@]} >= 2 )) || continue
+    exe_base="${argv[0]##*/}"
+    [[ "${exe_base}" == "python" || "${exe_base}" == "python3" || "${exe_base}" =~ ^python3\.[0-9]+$ ]] || continue
     cwd="$(readlink -f "${p}/cwd" 2>/dev/null || true)"
-    if [[ "${cmd}" == *"${ENV_PY}"* || "${cmd}" == *"${COMFY_DIR}/main.py"* || "${cwd}" == "${COMFY_DIR}" ]]; then
-      printf '%s\n' "${p##*/}"
-    fi
+    matched=0
+    for arg in "${argv[@]:1}"; do
+      if [[ "${arg}" == "${COMFY_DIR}/main.py" || "${arg}" == "${comfy_real}/main.py" ]]; then
+        matched=1
+        break
+      fi
+      if [[ "${arg}" == "main.py" || "${arg}" == "./main.py" ]] && [[ "${cwd}" == "${COMFY_DIR}" || "${cwd}" == "${comfy_real}" ]]; then
+        matched=1
+        break
+      fi
+    done
+    (( matched )) && printf '%s\n' "${p##*/}"
   done
 }
 
@@ -1790,13 +2081,17 @@ startd_launch_bg() {
   local logf="${STARTD_LOG_FILE}" bg_pid
   local -a pids=()
   if ! startd_configured; then
-    die_action "${STARTD_FILE} 尚未配置"
+    die_action "${STARTD_FILE} 尚未配置或缺少可执行权限"
     return 1
   fi
   mapfile -t pids < <(comfy_running_pids)
-  if (( ${#pids[@]} > 0 )) || port_listening; then
-    log "ComfyUI 已在运行，跳过重复拉起"
+  if (( ${#pids[@]} > 0 )); then
+    log "ComfyUI 已在运行（PID ${pids[*]}），跳过重复拉起"
     return 0
+  fi
+  if port_listening; then
+    die_action "端口 ${PORT} 已被其他进程占用，无法拉起 ComfyUI（请检查 ss -tlnp | grep :${PORT}）"
+    return 1
   fi
   if ! mkdir -p "${STARTD_LOG_DIR}" 2>/dev/null; then
     logf="/tmp/comfyui-startd.log"
@@ -1847,7 +2142,7 @@ autostart_remove() {
     systemctl daemon-reload >/dev/null 2>&1 || true
     log "已删除 systemd 服务"
   fi
-  if startd_configured; then
+  if startd_exists && [[ -f "${STARTD_FILE}" ]]; then
     backup_file "${STARTD_FILE}" >/dev/null || true
     rm -f "${STARTD_FILE}" || { die_action "删除 ${STARTD_FILE} 失败"; return 1; }
     log "已删除 /start.d 自启脚本"
@@ -1934,10 +2229,16 @@ service_action() {
   return 0
 }
 
+comfy_http_ok() {
+  local body
+  body="$(curl -fsS --max-time 4 "http://127.0.0.1:${PORT}/system_stats" 2>/dev/null || true)"
+  [[ "${body}" == *'"system"'* && "${body}" == *'"devices"'* ]]
+}
+
 wait_http_up() {
   local i
   for (( i = 0; i < 60; i++ )); do
-    if port_listening && curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then
+    if port_listening && comfy_http_ok; then
       return 0
     fi
     sleep 1
@@ -2036,6 +2337,8 @@ verify_all() {
     else check_warn "systemd 开机自启未启用"; fi
   elif startd_configured; then
     check_ok "/start.d 自启脚本已配置"
+  elif startd_exists && [[ -f "${STARTD_FILE}" ]]; then
+    check_fail "${STARTD_FILE} 存在但缺少可执行权限（chmod +x）"
   elif ! systemd_present && ! startd_exists; then
     check_warn "当前容器无 systemd 且无 /start.d，无法配置系统级开机自启"
   else
@@ -2045,8 +2348,10 @@ verify_all() {
   if port_listening; then check_ok "端口 ${PORT} 正在监听"
   else check_fail "端口 ${PORT} 未监听"; fi
 
-  if curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then
-    check_ok "HTTP 127.0.0.1:${PORT} 可访问"
+  if comfy_http_ok; then
+    check_ok "ComfyUI HTTP 127.0.0.1:${PORT}/system_stats 响应正常"
+  elif port_listening; then
+    check_fail "端口 ${PORT} 虽在监听，但 /system_stats 非 ComfyUI 响应（疑似端口冲突或正在初始化）"
   else
     check_fail "HTTP 127.0.0.1:${PORT} 不可访问"
   fi
@@ -2189,8 +2494,20 @@ do_standard_deploy() {
   smoke_test || { warn "标准部署已中止"; return 1; }
 
   step_banner 9 "访问方式：默认 listen 0.0.0.0:${PORT}"
-  ACCESS_MODE="listen"
-  ensure_fw_8188 || warn "UFW 放行失败；公网访问可能不可用"
+  if [[ -n "$(config_file)" && "$(current_access_mode)" == "tunnel" ]]; then
+    if ask_yesno "检测到现有自启配置为隧道模式（仅监听回环），是否保留隧道模式？（选 n 则改为公网 listen）" y; then
+      ACCESS_MODE="tunnel"
+    else
+      ACCESS_MODE="listen"
+    fi
+  else
+    ACCESS_MODE="listen"
+  fi
+  if [[ "${ACCESS_MODE}" == "listen" ]]; then
+    ensure_fw_8188 || warn "UFW 放行失败；公网访问可能不可用"
+  else
+    log "保留当前隧道模式（仅监听回环 ${PORT}）"
+  fi
 
   step_banner 10 "开机自启"
   autostart_write || { warn "自启配置失败"; return 1; }
@@ -2216,7 +2533,9 @@ do_standard_deploy() {
   if ! verify_all; then
     warn "终检存在红项；按上方提示修复后可重跑终检"
   fi
-  deploy_cleanup_caches
+  if ask_yesno "清理部署下载缓存（apt / pip / conda 安装包缓存，可释放约 3-5GB）？" n; then
+    deploy_cleanup_caches
+  fi
   printf '\n%sComfyUI 标准部署完成%s\n' "${C_B}" "${C_0}"
   return 0
 }
@@ -2593,6 +2912,7 @@ download_modelscope() {
     return 1
   fi
   log "ModelScope 下载 ${repo}/${file}"
+  mkdir -p "${dir}" || { die_action "创建目录失败：${dir}"; return 1; }
   if ! HOME="${ROOT_HOME}" "${cli}" download --model "${repo}" "${file}" --local_dir "${dir}"; then
     die_action "ModelScope 下载失败"
     return 1
@@ -2631,6 +2951,7 @@ download_hf() {
     return 1
   fi
   log "hf-mirror 下载 ${repo}/${file}"
+  mkdir -p "${dir}" || { die_action "创建目录失败：${dir}"; return 1; }
   if ! HF_ENDPOINT="https://hf-mirror.com" HF_HUB_ENABLE_HF_TRANSFER=1 \
        HOME="${ROOT_HOME}" "${cli}" download "${repo}" "${file}" --local-dir "${dir}"; then
     die_action "hf-mirror 下载失败"
@@ -2643,6 +2964,7 @@ download_hf() {
 download_aria2() {
   local url="$1" dir="$2" file="$3"
   ensure_cmd aria2c aria2 || return 1
+  mkdir -p "${dir}" || { die_action "创建目录失败：${dir}"; return 1; }
   log "aria2c 下载 ${file}"
   if ! aria2c -x 16 -s 16 -c -d "${dir}" -o "${file}" "${url}"; then
     die_action "aria2c 下载失败"
@@ -2703,12 +3025,10 @@ model_menu() {
       0) return 0 ;;
       1) act model_dirs_show || true; scr_pause ;;
       2) if ask_yesno "下载 SDXL Base（约 6.9GB）到 ${def_dir}？" n; then
-           mkdir -p "${def_dir}"
            act download_modelscope "AI-ModelScope/stable-diffusion-xl-base-1.0" "sd_xl_base_1.0.safetensors" "${def_dir}" || true
          fi
          scr_pause ;;
       3) if ask_yesno "下载 SDXL Base（约 6.9GB）到 ${def_dir}？" n; then
-           mkdir -p "${def_dir}"
            act download_hf "stabilityai/stable-diffusion-xl-base-1.0" "sd_xl_base_1.0.safetensors" "${def_dir}" || true
          fi
          scr_pause ;;
@@ -2735,7 +3055,7 @@ access_menu() {
     ui_sep
     ui_kv "当前方式" "$(current_access_mode)"
     ui_kv "UFW" "$(fw_active && printf 'active' || printf 'inactive/未安装')"
-    ui_kv "8188" "$(fw_has_port && printf '已放行' || printf '未放行')"
+    ui_kv "${PORT}" "$(if fw_has_port; then fw_active && printf '已放行' || printf '已预写（UFW 未启用）'; else printf '未放行'; fi)"
     ui_sep
     printf '  %s默认监听 0.0.0.0:%s，无鉴权；公网直连风险自负。%s\n' "${C_Y}" "${PORT}" "${C_0}"
     ui_sep
@@ -2771,9 +3091,9 @@ apply_access_mode() {
     ensure_fw_8188 || warn "UFW 放行失败"
   fi
   sync_runtime_mode
-  if unit_exists || startd_configured; then
+  if { systemd_present && unit_exists; } || { startd_exists && [[ -f "${STARTD_FILE}" ]]; }; then
     autostart_write || return 1
-    if startd_configured && { port_listening || [[ -n "$(comfy_running_pids)" ]]; }; then
+    if ! systemd_present && startd_configured && (( AUTOSTART_CHANGED )) && [[ -n "$(comfy_running_pids)" ]]; then
       service_restart || return 1
     fi
   elif env_ok && comfy_present; then
@@ -2810,21 +3130,25 @@ service_summary() {
     st="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || true)"
     printf '%s' "${st:-unknown}"
   elif startd_configured; then
-    if port_listening || [[ -n "$(comfy_running_pids)" ]]; then
+    if [[ -n "$(comfy_running_pids)" ]] || comfy_http_ok; then
       printf '/start.d 运行中'
     else
       printf '/start.d 未运行'
     fi
+  elif startd_exists && [[ -f "${STARTD_FILE}" ]]; then
+    printf '/start.d 缺少执行权限'
   else
     printf '未配置'
   fi
 }
 
 autostart_summary() {
-  if service_enabled; then
-    printf 'enabled'
-  elif unit_exists || { startd_configured; }; then
-    printf '未启用'
+  if systemd_present && unit_exists; then
+    if service_enabled; then printf 'enabled'; else printf '未启用'; fi
+  elif startd_configured; then
+    printf '已配置 (/start.d)'
+  elif startd_exists && [[ -f "${STARTD_FILE}" ]]; then
+    printf '缺少执行权限 (/start.d)'
   else
     printf '未配置'
   fi
@@ -2876,11 +3200,11 @@ toggle_cpu_mode() {
   fi
   CPU_MODE_DECIDED=1
   ACCESS_MODE="$(current_access_mode)"
-  if unit_exists; then
+  if systemd_present && unit_exists; then
     write_systemd_unit || return 1
-  elif startd_configured; then
+  elif startd_exists && [[ -f "${STARTD_FILE}" ]]; then
     write_startd_script || return 1
-    if port_listening || [[ -n "$(comfy_running_pids)" ]]; then
+    if (( AUTOSTART_CHANGED )) && [[ -n "$(comfy_running_pids)" ]]; then
       service_restart || return 1
     fi
   else
@@ -2973,28 +3297,29 @@ service_header() {
     if service_enabled; then printf ' / enabled'; fi
     printf ' / %s' "$(current_access_mode)"
   elif startd_configured; then
-    if port_listening || [[ -n "$(comfy_running_pids)" ]]; then
+    if [[ -n "$(comfy_running_pids)" ]] || comfy_http_ok; then
       printf '%s / %s' "$(ui_yes '/start.d active')" "$(current_access_mode)"
     else
       printf '%s / %s' "$(ui_no '/start.d 未运行')" "$(current_access_mode)"
     fi
+  elif startd_exists && [[ -f "${STARTD_FILE}" ]]; then
+    printf '%s' "$(ui_no '/start.d 缺少执行权限 ⚠')"
   else
     printf '%s' "未配置"
   fi
 }
 
 fw_header() {
-  local raw
   if ! fw_installed; then
     printf '%s' "$(ui_no '未安装')"
     return 0
   fi
-  raw="$(fw_raw)"
-  if [[ "${raw}" == Status:\ active* ]]; then
-    if [[ "${raw}" == *"${PORT}/tcp"* ]]; then printf '%s' "$(ui_yes 'active / 8188 已放行')"
-    else printf '%s' "$(ui_no 'active / 8188 未放行 ⚠')"; fi
+  if fw_active; then
+    if fw_has_port; then printf '%s' "$(ui_yes "active / ${PORT} 已放行")"
+    else printf '%s' "$(ui_no "active / ${PORT} 未放行 ⚠")"; fi
   else
-    printf '%s' "$(ui_no 'inactive')"
+    if fw_has_port; then printf '%s' "$(ui_no "inactive（已预写 ${PORT}）")"
+    else printf '%s' "$(ui_no 'inactive')"; fi
   fi
 }
 
