@@ -290,9 +290,27 @@ missing_pkgs() {
     pkg_installed "${p}" || printf '%s ' "${p}"
   done
 }
+run_with_timeout() {
+  local secs="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${secs}" "$@"
+  else
+    "$@"
+  fi
+}
+
+apt_run() {
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 "$@"
+}
+
+apt_clean_archives() {
+  apt-get clean >/dev/null 2>&1 || true
+}
+
 apt_update_index() {
   log "apt-get update"
-  if ! DEBIAN_FRONTEND=noninteractive apt-get update; then
+  if ! apt_run update; then
     die_action "apt-get update 失败（检查网络与软件源）"
     return 1
   fi
@@ -308,25 +326,40 @@ ensure_cmd() {
     return 1
   fi
   apt_update_index || return 1
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkg}"; then
+  if ! apt_run install -y "${pkg}"; then
     die_action "安装 ${pkg} 失败"
     return 1
   fi
+  apt_clean_archives
   return 0
 }
 
 fetch_file() {
-  local url="$1" out="$2"
-  if command -v wget >/dev/null 2>&1; then
-    wget -c -O "${out}" "${url}"
-    return $?
-  fi
+  local url="$1" out="$2" part="${2}.part"
+  rm -f -- "${part}"
   if command -v curl >/dev/null 2>&1; then
-    curl -fSL -o "${out}" "${url}"
-    return $?
+    if curl -fSL --connect-timeout 15 --speed-limit 1024 --speed-time 30 -o "${part}" "${url}" && [[ -s "${part}" ]]; then
+      mv -f -- "${part}" "${out}"
+      return 0
+    fi
+    rm -f -- "${part}"
+    return 1
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    if wget --timeout=20 --tries=3 -O "${part}" "${url}" && [[ -s "${part}" ]]; then
+      mv -f -- "${part}" "${out}"
+      return 0
+    fi
+    rm -f -- "${part}"
+    return 1
   fi
   ensure_cmd curl curl || return 1
-  curl -fSL -o "${out}" "${url}"
+  if curl -fSL --connect-timeout 15 --speed-limit 1024 --speed-time 30 -o "${part}" "${url}" && [[ -s "${part}" ]]; then
+    mv -f -- "${part}" "${out}"
+    return 0
+  fi
+  rm -f -- "${part}"
+  return 1
 }
 
 install_base_packages() {
@@ -347,10 +380,11 @@ install_base_packages() {
   apt_update_index || return 1
   read -r -a miss_arr <<< "${miss}"
   log "安装：${miss}"
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${miss_arr[@]}"; then
+  if ! apt_run install -y "${miss_arr[@]}"; then
     die_action "安装失败：${miss}（检查网络/源后重试）"
     return 1
   fi
+  apt_clean_archives
   return 0
 }
 
@@ -378,21 +412,21 @@ gpu_hardware_present() {
 }
 gpu_driver_ready() {
   command -v nvidia-smi >/dev/null 2>&1 || return 1
-  nvidia-smi -L >/dev/null 2>&1
+  run_with_timeout 5 nvidia-smi -L >/dev/null 2>&1
 }
 gpu_name() {
   local out
-  out="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || true)"
+  out="$(run_with_timeout 5 nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || true)"
   printf '%s' "${out%%$'\n'*}"
 }
 gpu_driver_version() {
   local out
-  out="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null || true)"
+  out="$(run_with_timeout 5 nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null || true)"
   printf '%s' "${out%%$'\n'*}"
 }
 gpu_cuda_version() {
   local out
-  out="$(nvidia-smi 2>/dev/null || true)"
+  out="$(run_with_timeout 5 nvidia-smi 2>/dev/null || true)"
   awk '/CUDA Version/ {for (i=1;i<=NF;i++) if ($i=="CUDA" && $(i+1)=="Version:") {print $(i+2); exit}}' <<< "${out}"
 }
 cuda_major() { local v="$1"; printf '%s' "${v%%.*}"; }
@@ -602,10 +636,9 @@ comfy_summary() {
   fi
 }
 pip_version() {
-  local pkg="$1" out
+  local pkg="$1"
   [[ -x "${ENV_PY}" ]] || return 0
-  out="$(env_py -m pip show "${pkg}" 2>/dev/null || true)"
-  awk '/^Version:/ {print $2; exit}' <<< "${out}"
+  run_with_timeout 5 env_py -c "import importlib.metadata as m; print(m.version('${pkg}'))" 2>/dev/null || true
 }
 
 public_ip() {
@@ -705,16 +738,20 @@ driver_flavor_label() {
 
 driver_guard_environment() {
   if ! systemd_present && gpu_driver_ready; then
-    warn "检测到非 systemd 环境（疑似容器实例）且 nvidia-smi 已就绪；容器驱动通常由宿主机提供"
+    printf '\n'
+    warn "检测到非 systemd 环境（疑似容器实例），且 nvidia-smi 已就绪。"
+    printf '  容器的 GPU 驱动通常由宿主机提供，一般无需在容器内重装。\n\n'
     if ! ask_yesno "仍要在当前环境继续安装/升级驱动？" n; then
       log "已取消驱动操作"
       return 1
     fi
   fi
   if gpu_driver_ready && [[ -z "$(driver_dpkg_owner)" ]]; then
-    warn "检测到 nvidia-smi 不归属于任何 apt/dpkg 包（疑似 .run 手动安装或宿主机透传）"
-    warn "直接通过 apt 安装/升级可能与现有内核模块冲突并破坏驱动！"
-    if ! ask_yesno "确认仍继续通过 apt 安装/升级驱动（建议先确认 Snapshot）？" n; then
+    printf '\n'
+    warn "当前 nvidia-smi 不归属于任何 apt/dpkg 包（疑似 .run 手动安装或宿主机透传）。"
+    printf '  - 直接通过 apt 安装/升级可能与现有内核模块冲突并破坏驱动。\n'
+    printf '  - 继续前建议先确认已在云平台创建 Snapshot。\n\n'
+    if ! ask_yesno "确认仍通过 apt 安装/升级驱动？" n; then
       die_action "已中止，避免覆盖非 dpkg 驱动"
       return 1
     fi
@@ -763,10 +800,11 @@ driver_apt_install_pkg() {
       DRIVER_CHANGED=0
       return 0
     fi
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall "${pkg}"; then
+    if ! apt_run install -y --reinstall "${pkg}"; then
       die_action "重装 ${pkg} 失败"
       return 1
     fi
+    apt_clean_archives
     DRIVER_CHANGED=1
     return 0
   fi
@@ -776,10 +814,11 @@ driver_apt_install_pkg() {
     log "已取消驱动安装/升级"
     return 0
   fi
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkg}"; then
+  if ! apt_run install -y "${pkg}"; then
     die_action "安装/升级 ${pkg} 失败"
     return 1
   fi
+  apt_clean_archives
   DRIVER_CHANGED=1
   return 0
 }
@@ -788,7 +827,7 @@ driver_install_path_a() {
   local out max branches target_branch pkg pol inst cand suffix="" cur_pkg
   if ! command -v ubuntu-drivers >/dev/null 2>&1; then
     apt_update_index || return 1
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-drivers-common; then
+    if ! apt_run install -y ubuntu-drivers-common; then
       die_action "安装 ubuntu-drivers-common 失败"
       return 1
     fi
@@ -838,10 +877,10 @@ driver_install_path_b() {
   cur_pkg="$(driver_installed_pkg)"
   pol_open="$(apt_pkg_policy nvidia-open)"
   pol_cuda="$(apt_pkg_policy cuda-drivers)"
-  printf '\nNVIDIA 官方源最新稳定候选：\n'
+  printf '\n%sNVIDIA 官方源最新稳定候选：%s\n' "${C_B}" "${C_0}"
   printf '  1) nvidia-open  （开源内核模块，Turing+ 推荐） 当前: %-16s 候选: %s\n' "${pol_open%%|*}" "${pol_open#*|}"
   printf '  2) cuda-drivers （官方闭源/全兼容稳定版）        当前: %-16s 候选: %s\n' "${pol_cuda%%|*}" "${pol_cuda#*|}"
-  printf '  3) 指定驱动大版本号（如 580 / 590）\n'
+  printf '  3) 指定驱动大版本号（如 580 / 590）\n\n'
   if [[ "${cur_pkg}" == "cuda-drivers" ]]; then def="2"; fi
   mode="$(ask_input_def "选择安装/升级方式" v_choice_three "${def}")" || return 1
   case "${mode}" in
@@ -915,10 +954,11 @@ cuda_toolkit_install() {
     log "cuda-toolkit 已是最新（${inst}）"
     if ! ask_yesno "仍重装 cuda-toolkit？" n; then return 0; fi
   fi
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y cuda-toolkit; then
+  if ! apt_run install -y cuda-toolkit; then
     die_action "cuda-toolkit 安装失败"
     return 1
   fi
+  apt_clean_archives
   local bashrc="${ROOT_HOME}/.bashrc"
   backup_file "${bashrc}" >/dev/null || true
   if ! grep -qF '/usr/local/cuda/bin' "${bashrc}" 2>/dev/null; then
@@ -1251,17 +1291,25 @@ EOF
   return 0
 }
 
+pip_install() {
+  env_py -m pip install --timeout 30 --retries 3 "$@"
+}
+
 pip_install_fallback() {
   local desc="$1"
   shift
-  if env_py -m pip install "$@"; then
+  if pip_install "$@"; then
     return 0
   fi
   warn "${desc} 安装失败（阿里 PyPI）"
   if ! ask_yesno "改用清华 PyPI 重试？" y; then
     return 1
   fi
-  env_py -m pip install --index-url "${PIP_MIRROR_FALLBACK}" "$@"
+  pip_install --index-url "${PIP_MIRROR_FALLBACK}" "$@"
+}
+
+git_net() {
+  GIT_TERMINAL_PROMPT=0 git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 "$@"
 }
 
 comfy_clone_or_pull() {
@@ -1277,7 +1325,7 @@ comfy_clone_or_pull() {
   if comfy_git_ok; then
     local before after
     before="$(git -C "${COMFY_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
-    if ! git -C "${COMFY_DIR}" pull --ff-only; then
+    if ! git_net -C "${COMFY_DIR}" pull --ff-only; then
       warn "git pull 失败（可能有本地改动或分支分叉）；保留当前代码继续"
       return 0
     fi
@@ -1286,13 +1334,13 @@ comfy_clone_or_pull() {
     return 0
   fi
   log "克隆 ComfyUI 到 ${COMFY_DIR}"
-  if ! git clone "${COMFY_REPO}" "${COMFY_DIR}"; then
+  if ! git_net clone "${COMFY_REPO}" "${COMFY_DIR}"; then
     warn "GitHub clone 失败"
     if ! ask_yesno "使用 ghproxy 代理重试 clone？" n; then
       die_action "已取消 ComfyUI 克隆"
       return 1
     fi
-    if ! git clone "${COMFY_REPO_PROXY}" "${COMFY_DIR}"; then
+    if ! git_net clone "${COMFY_REPO_PROXY}" "${COMFY_DIR}"; then
       die_action "ComfyUI 克隆失败"
       return 1
     fi
@@ -1321,9 +1369,9 @@ torch_install() {
   if (( CPU_MODE == 0 )) && ! gpu_driver_ready; then
     if gpu_hardware_present; then
       warn "检测到 NVIDIA GPU，但当前驱动未就绪（nvidia-smi 不可用）"
-      printf '  1) 预装 CUDA 13 版 PyTorch（装完驱动重启后再验证可用性）\n'
-      printf '  2) 安装 CPU 版 PyTorch（仅测试）\n'
-      printf '  3) 取消（先去菜单 3 安装驱动）\n'
+      printf '\n  1) 预装 CUDA 13 版 PyTorch（装完驱动并重启后再验证可用性）\n'
+      printf '  2) 安装 CPU 版 PyTorch（仅测试用途）\n'
+      printf '  3) 取消（先去菜单 3 安装驱动）\n\n'
       mode_choice="$(ask_input_def "选择处理方式" v_choice_three "3")" || return 1
       case "${mode_choice}" in
         1) preinstall_no_driver=1 ;;
@@ -1345,10 +1393,10 @@ torch_install() {
     if (( CPU_MODE )); then
       if [[ "${ver}" == *"+cpu"* || -z "${cuda}" ]]; then
         if (( allow_upgrade )) && ask_yesno "当前已装 CPU 版 PyTorch ${ver}，是否升级到最新稳定版？" n; then
-          if ! env_py -m pip install -U torch torchvision --index-url "${CPU_INDEX}"; then
+          if ! pip_install -U torch torchvision --index-url "${CPU_INDEX}"; then
             warn "官方 CPU 索引升级失败"
             if ask_yesno "改用南京大学 CPU 镜像重试？" y; then
-              env_py -m pip install -U torch torchvision --index-url "${CPU_INDEX_FALLBACK}" || {
+              pip_install -U torch torchvision --index-url "${CPU_INDEX_FALLBACK}" || {
                 die_action "PyTorch 升级失败"; return 1;
               }
             else
@@ -1391,13 +1439,13 @@ torch_install() {
   fi
   if (( CPU_MODE )); then
     log "安装 CPU 版 torch / torchvision（官方 CPU 索引）"
-    if ! env_py -m pip install torch torchvision --index-url "${CPU_INDEX}"; then
+    if ! pip_install torch torchvision --index-url "${CPU_INDEX}"; then
       warn "官方 CPU 索引失败"
       if ! ask_yesno "改用南京大学 CPU 镜像重试？" y; then
         die_action "PyTorch 安装失败"
         return 1
       fi
-      if ! env_py -m pip install torch torchvision --index-url "${CPU_INDEX_FALLBACK}"; then
+      if ! pip_install torch torchvision --index-url "${CPU_INDEX_FALLBACK}"; then
         die_action "PyTorch 安装失败"
         return 1
       fi
@@ -1745,17 +1793,22 @@ show_access_info() {
   local mode ip
   mode="$(current_access_mode)"
   ip="$(public_ip || true)"
+  printf '\n'
+  ui_sep
+  printf '%s访问指引%s\n' "${C_B}" "${C_0}"
   printf '  访问方式：%s\n' "${mode}"
   if [[ "${mode}" == "listen" ]]; then
-    printf '  公网地址：http://%s:%s\n' "${ip:-<公网IP>}" "${PORT}"
+    printf '  公网地址：%shttp://%s:%s%s\n' "${C_G}" "${ip:-<公网IP>}" "${PORT}" "${C_0}"
     printf '  备用隧道：ssh -N -L %s:127.0.0.1:%s root@%s\n' "${PORT}" "${PORT}" "${ip:-<公网IP>}"
   else
-    printf '  本地隧道：ssh -N -L %s:127.0.0.1:%s root@%s\n' "${PORT}" "${PORT}" "${ip:-<公网IP>}"
-    printf '  然后打开：http://127.0.0.1:%s\n' "${PORT}"
+    printf '  本地隧道：%sssh -N -L %s:127.0.0.1:%s root@%s%s\n' "${C_G}" "${PORT}" "${PORT}" "${ip:-<公网IP>}" "${C_0}"
+    printf '  本地打开：http://127.0.0.1:%s\n' "${PORT}"
   fi
-  printf '  说明：以上为出口 IP；若平台使用独立 EIP，以控制台为准。\n'
-  printf '  云安全组：需放行 %s/tcp，来源建议限制为你的 IP/32\n' "${PORT}"
-  printf '  Manager：listen 模式下界面装插件会被拦截；需要时菜单 7 切隧道\n'
+  printf '\n  %s注意事项：%s\n' "${C_D}" "${C_0}"
+  printf '    - 上方 IP 为本机出口 IP；若使用独立 EIP，请以云控制台为准。\n'
+  printf '    - 云安全组需放行 %s/tcp，来源建议限制为你自己的 IP/32。\n' "${PORT}"
+  printf '    - Manager 插件安装受限于安全策略，listen 模式下需先到菜单 7 切换为隧道模式。\n'
+  ui_sep
 }
 
 # ============ 终检 ============
@@ -1865,9 +1918,11 @@ step_banner() { printf '\n%s== 步骤 %s：%s ==%s\n' "${C_B}" "$1" "$2" "${C_0}
 preflight_deploy() {
   local gb
   log "环境：$(distro_pretty)；$(uname -m)"
-  printf '\n%s默认访问方式为 --listen 0.0.0.0:%s，ComfyUI 无鉴权。%s\n' "${C_Y}" "${PORT}" "${C_0}"
-  printf '请确保已在云平台创建 Snapshot，并准备好在安全组放行 %s/tcp。\n' "${PORT}"
-  if ! ask_yesno "已创建 Snapshot 并知晓公网暴露风险？" n; then
+  printf '\n%s部署前安全提醒%s\n' "${C_Y}" "${C_0}"
+  printf '  - 默认以 --listen 0.0.0.0:%s 对外监听，ComfyUI 本身无登录鉴权。\n' "${PORT}"
+  printf '  - 请确认已在云平台创建 Snapshot，避免操作失误无法回滚。\n'
+  printf '  - 如需公网直连，请提前在云安全组放行 %s/tcp（建议限制来源 IP）。\n\n' "${PORT}"
+  if ! ask_yesno "已创建 Snapshot 并知晓公网暴露风险，继续部署？" n; then
     die_action "已取消部署"
     return 1
   fi
@@ -1902,6 +1957,19 @@ preflight_deploy() {
     if ! ask_yesno "pip 镜像不可达，仍继续？" n; then return 1; fi
   }
   return 0
+}
+
+deploy_cleanup_caches() {
+  apt_clean_archives
+  if env_ok; then
+    env_py -m pip cache purge >/dev/null 2>&1 || rm -rf -- "${ROOT_HOME}/.cache/pip"
+  else
+    rm -rf -- "${ROOT_HOME}/.cache/pip"
+  fi
+  if conda_ok; then
+    HOME="${ROOT_HOME}" "${CONDA_BIN}" clean -t -p -y >/dev/null 2>&1 || true
+  fi
+  log "已清理流程下载缓存（apt / pip / conda 临时包）"
 }
 
 do_standard_deploy() {
@@ -1978,6 +2046,7 @@ do_standard_deploy() {
   if ! verify_all; then
     warn "终检存在红项；按上方提示修复后可重跑终检"
   fi
+  deploy_cleanup_caches
   printf '\n%sComfyUI 标准部署完成%s\n' "${C_B}" "${C_0}"
   return 0
 }
@@ -2028,7 +2097,7 @@ status_menu() {
     printf '服务未配置\n'
   fi
   ss -tlnp 2>&1 | grep -E ":${PORT}\b|State" || true
-  ufw status 2>&1 || true
+  if fw_installed; then ufw status 2>&1 || true; else printf 'UFW 未安装\n'; fi
   printf '\n[镜像连通性]\n'
   mirror_check "清华 Miniforge" "${MINIFORGE_URL}" || true
   mirror_check "清华 conda-forge" "${CONDA_MIRROR}/conda-forge/linux-64/repodata.json" || true
@@ -2039,19 +2108,30 @@ status_menu() {
 
 # ============ 菜单：基础包与镜像 ============
 mirror_instructions() {
-  printf '  第三方来源：SuperManito 的 LinuxMirrors（%s）\n' "${LINUXMIRRORS_URL}"
-  printf '  免责声明：本项目不提供或维护该脚本，也未对当前在线版本完成全量安全审计。\n'
-  printf '  只有在你自行审阅并接受以 root 执行第三方代码的风险后才运行。\n'
-  printf '  运行前确认已在云平台创建 Snapshot；对应命令：\n'
-  printf '    bash <(curl -fsSL %s)\n' "${LINUXMIRRORS_URL}"
-  printf '  若随后继续本部署流程，请在第三方脚本中选择跳过软件包升级；本流程稍后会按需装包。\n'
+  printf '\n'
+  ui_sep
+  printf '%s第三方系统换源说明（LinuxMirrors）%s\n' "${C_B}" "${C_0}"
+  printf '  脚本来源：%s\n' "${LINUXMIRRORS_URL}"
+
+  printf '\n  %s免责声明：%s\n' "${C_Y}" "${C_0}"
+  printf '    - 本项目不提供或维护该脚本，也未对当前在线版本完成全量安全审计。\n'
+  printf '    - 仅在你已审阅脚本内容，并接受以 root 权限执行第三方代码的风险时运行。\n'
+  printf '    - 执行前请确认已在云平台创建 Snapshot。\n'
+
+  printf '\n  %s手动执行命令：%s\n' "${C_D}" "${C_0}"
+  printf '    %sbash <(curl -fsSL %s)%s\n' "${C_G}" "${LINUXMIRRORS_URL}" "${C_0}"
+
+  printf '\n  %s操作提示：%s\n' "${C_D}" "${C_0}"
+  printf '    - 若随后继续本部署流程，请在换源脚本中选择「跳过软件包升级」，\n'
+  printf '      本脚本稍后会按需安装必要组件。\n'
+  ui_sep
 }
 
 mirror_execute_linuxmirrors() {
   local tmp="${TMPD}/linuxmirrors.sh" rc=0
   ensure_cmd curl curl || return 1
   log "拉取 ${LINUXMIRRORS_URL}"
-  if ! curl -fsSL -o "${tmp}" "${LINUXMIRRORS_URL}" || [[ ! -s "${tmp}" ]]; then
+  if ! curl -fsSL --connect-timeout 15 --max-time 60 -o "${tmp}" "${LINUXMIRRORS_URL}" || [[ ! -s "${tmp}" ]]; then
     rm -f -- "${tmp}"
     die_action "下载换源脚本失败（检查网络或手动执行上方命令）"
     return 1
@@ -2069,6 +2149,7 @@ mirror_execute_linuxmirrors() {
 # 返回：0 已执行成功；1 执行失败；2 用户未执行（仅展示说明）
 mirror_change_action() {
   mirror_instructions
+  printf '\n'
   if ask_yesno "已阅读以上免责声明并自愿承担风险，是否立即执行换源命令？" n; then
     mirror_execute_linuxmirrors || return 1
     return 0
@@ -2268,7 +2349,7 @@ comfy_update() {
     return 1
   fi
   before="$(git -C "${COMFY_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
-  if ! git -C "${COMFY_DIR}" pull --ff-only; then
+  if ! git_net -C "${COMFY_DIR}" pull --ff-only; then
     warn "git pull 失败；请先处理本地改动或分支分叉（git -C ${COMFY_DIR} status）"
     return 1
   fi
@@ -2505,7 +2586,7 @@ access_menu() {
 access_info_page() {
   show_access_info
   printf '\n'
-  ufw status 2>&1 || true
+  if fw_installed; then ufw status 2>&1 || true; else printf 'UFW 未安装\n'; fi
   page_wait "按回车返回…"
 }
 
@@ -2709,12 +2790,14 @@ service_header() {
 }
 
 fw_header() {
+  local raw
   if ! fw_installed; then
     printf '%s' "$(ui_no '未安装')"
     return 0
   fi
-  if fw_active; then
-    if fw_has_port; then printf '%s' "$(ui_yes 'active / 8188 已放行')"
+  raw="$(fw_raw)"
+  if [[ "${raw}" == Status:\ active* ]]; then
+    if [[ "${raw}" == *"${PORT}/tcp"* ]]; then printf '%s' "$(ui_yes 'active / 8188 已放行')"
     else printf '%s' "$(ui_no 'active / 8188 未放行 ⚠')"; fi
   else
     printf '%s' "$(ui_no 'inactive')"
