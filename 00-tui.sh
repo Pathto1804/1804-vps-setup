@@ -410,6 +410,16 @@ admin_from_allowusers() {   # 有效 AllowUsers 中「唯一且存在的非 root
   printf '%s' "${users[0]}"
 }
 
+auto_detect_admin() {   # 仅只读探测：未指定或账号失效时尝试从 AllowUsers 回填 ADMIN_USER
+  local auto_u
+  if [[ -n "${ADMIN_USER}" ]] && user_exists "${ADMIN_USER}" && user_is_nonroot "${ADMIN_USER}"; then
+    return 0
+  fi
+  auto_u="$(admin_from_allowusers)"
+  [[ -n "${auto_u}" ]] && ADMIN_USER="${auto_u}"
+  return 0
+}
+
 ssh_root_only_allowusers() {   # 当前有效 AllowUsers 只列 root（可带 @host）
   local eff
   eff="$(ssh_eff)"
@@ -753,6 +763,30 @@ ui_yes()  { printf '%s%s%s' "${C_G}" "$1" "${C_0}"; }
 ui_no()   { printf '%s%s%s' "${C_Y}" "$1" "${C_0}"; }
 
 # ============ 模块 2：系统更新与基础工具 ============
+APT_UPDATED=0
+
+apt_list_has_index() {
+  compgen -G "/var/lib/apt/lists/*_Packages*" >/dev/null 2>&1 \
+    || compgen -G "/var/lib/apt/lists/*_InRelease" >/dev/null 2>&1 \
+    || compgen -G "/var/lib/apt/lists/*_Release" >/dev/null 2>&1
+}
+
+apt_install_pkgs() {   # apt_install_pkgs <pkg...>: 缺索引或安装失败时自动刷新索引一次，支持单独运行
+  if (( ! APT_UPDATED )) && ! apt_list_has_index; then
+    log "检测到本地 apt 索引为空，先刷新索引"
+    apt_update_index || return 1
+  fi
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"; then
+    return 0
+  fi
+  if (( ! APT_UPDATED )); then
+    warn "安装失败，尝试先刷新 apt 索引后重试"
+    apt_update_index || return 1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" && return 0
+  fi
+  return 1
+}
+
 install_missing_base() {
   local miss
   miss="$(missing_pkgs ${BASE})"
@@ -766,7 +800,8 @@ install_missing_base() {
     return 1
   fi
   log "安装缺失包：${miss}"
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y ${miss}; then
+  # shellcheck disable=SC2086
+  if ! apt_install_pkgs ${miss}; then
     die_action "安装失败：${miss}（检查网络/源后重试）"
     return 1
   fi
@@ -812,6 +847,7 @@ apt_update_index() {
     die_action "apt-get update 失败（检查网络与软件源）"
     return 1
   fi
+  APT_UPDATED=1
   return 0
 }
 
@@ -852,7 +888,8 @@ base_do_extra() {
     return 0
   fi
   log "安装：${miss}"
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y ${miss}; then
+  # shellcheck disable=SC2086
+  if ! apt_install_pkgs ${miss}; then
     die_action "安装失败：${miss}（检查网络/源后重试）"
     return 1
   fi
@@ -1138,9 +1175,23 @@ user_do_show_keys() {
   return 0
 }
 
+ensure_user_target() {
+  if [[ -n "${ADMIN_USER}" ]] && user_exists "${ADMIN_USER}" && user_is_nonroot "${ADMIN_USER}"; then
+    return 0
+  fi
+  user_do_switch || return 1
+  need_admin
+}
+
+user_run_with_admin() {
+  local fn="$1"
+  ensure_user_target || return 0
+  "${fn}"
+}
+
 user_menu() {
   local pw sudo_st keys
-  user_do_switch || true
+  auto_detect_admin
   while :; do
     if [[ -n "${ADMIN_USER}" ]] && user_exists "${ADMIN_USER}"; then
       pw="$(pw_state "${ADMIN_USER}")"
@@ -1152,7 +1203,7 @@ user_menu() {
     scr_clear
     ui_rule
     if [[ -n "${ADMIN_USER}" ]] && user_exists "${ADMIN_USER}"; then
-      printf '%s 用户、密码、sudo 与密钥 · %s%s\n' "${C_B}" "${C_G}" "${ADMIN_USER}"
+      printf '%s 用户、密码、sudo 与密钥 · %s%s%s\n' "${C_B}" "${C_G}" "${ADMIN_USER}" "${C_0}"
     elif [[ -n "${ADMIN_USER}" ]]; then
       printf '%s 用户、密码、sudo 与密钥 · %s%s（不存在）%s\n' "${C_B}" "${C_Y}" "${ADMIN_USER}" "${C_0}"
     else
@@ -1160,9 +1211,9 @@ user_menu() {
     fi
     ui_sep
     if [[ -z "${ADMIN_USER}" ]] || ! user_exists "${ADMIN_USER}"; then
-      ui_kv "登录密码" "$(ui_no '—（先选 1 指定用户）')"
-      ui_kv "sudo 免密" "$(ui_no '—（先选 1 指定用户）')"
-      ui_kv "公钥" "$(ui_no '—（先选 1 指定用户）')"
+      ui_kv "登录密码" "$(ui_no '—（先选 1 指定或执行操作时选择）')"
+      ui_kv "sudo 免密" "$(ui_no '—（先选 1 指定或执行操作时选择）')"
+      ui_kv "公钥" "$(ui_no '—（先选 1 指定或执行操作时选择）')"
     else
       if [[ "${pw}" == "P" ]]; then ui_kv "登录密码" "$(ui_yes '已设置 ✓')"
       elif [[ "${pw}" == "L" || "${pw}" == "NP" ]]; then ui_kv "登录密码" "$(ui_no '未设置 ⚠')"
@@ -1188,11 +1239,11 @@ user_menu() {
     case "${UI_REPLY}" in
       0) return 0 ;;
       1) act user_do_switch ;;
-      2) need_admin && act user_do_password ;;
-      3) need_admin && act user_do_sudo ;;
-      4) need_admin && act user_do_key_add ;;
-      5) need_admin && act user_do_key_del ;;
-      6) need_admin && act user_do_show_keys ;;
+      2) act user_run_with_admin user_do_password ;;
+      3) act user_run_with_admin user_do_sudo ;;
+      4) act user_run_with_admin user_do_key_add ;;
+      5) act user_run_with_admin user_do_key_del ;;
+      6) act user_run_with_admin user_do_show_keys ;;
     esac
     page_wait "按回车返回用户菜单…"
   done
@@ -1217,30 +1268,44 @@ do_scan_dropins() {
   return 0
 }
 
-ufw_precheck() {   # ufw_precheck <当前端口> <目标端口>：铁律一，目标端口须已放行；迁移期旧端口也须保留
-  local cur="$1" target="$2"
-  command -v ufw >/dev/null 2>&1 || return 0
-  fw_refresh
-  if [[ "$(fw_state)" != "active" ]]; then
-    die_action "ufw 未启用。请先用本菜单 1 配置并启用防火墙（铁律：UFW 先于 sshd）"
-    return 1
-  fi
-  if ! fw_has_rule "${target}/tcp"; then
-    die_action "ufw 已启用但未放行 ${target}/tcp。请先用本菜单 1 放行（铁律：UFW 先于 sshd）"
-    return 1
-  fi
-  if [[ "${cur}" != "${target}" ]] && ! fw_has_rule "${cur}/tcp"; then
-    die_action "迁移期间旧端口 ${cur}/tcp 必须保持放行（闸门二确认前不能断退路）。请先用本菜单 1 放行"
-    return 1
-  fi
+sshd_allowusers_tokens() {   # 从 sshd -T 提取存在的非 root AllowUsers 列表（空格分隔）
+  local eff raw tok u
+  local -a out=()
+  eff="$(ssh_eff)"
+  [[ -n "${eff}" ]] || return 0
+  raw="$(awk 'tolower($1)=="allowusers"{for(i=2;i<=NF;i++) print $i}' <<<"${eff}")"
+  while IFS= read -r tok; do
+    [[ -n "${tok}" ]] || continue
+    u="${tok%%@*}"
+    [[ -n "${u}" && "${u}" != "root" ]] || continue
+    user_exists "${u}" || continue
+    out+=("${tok}")
+  done <<< "${raw}"
+  (( ${#out[@]} > 0 )) && printf '%s' "${out[*]}"
   return 0
 }
 
-ssh_harden() {   # ssh_harden <目标端口>：写 drop-in + 双闸门；成功 0，拒绝 1
-  local target="$1" cur actual listening ports migration=0
-  [[ -f "${SSHD_CFG}" ]] || { die_action "未找到 ${SSHD_CFG}"; return 1; }
-  grep -q '^Include' "${SSHD_CFG}" || \
-    { die_action "需先在 sshd_config 启用 Include drop-in（本流程依赖 drop-in 覆盖）"; return 1; }
+sshd_allowusers_raw() {   # 从 sshd -T 提取完整 allowusers 列表（空格分隔，含顺序）
+  awk 'tolower($1)=="allowusers"{for(i=2;i<=NF;i++) printf "%s%s", (n++?" ":""), $i}' <<<"$1"
+}
+
+resolve_harden_allowusers() {   # 解析加固要写入的 AllowUsers，写入 HARDEN_ALLOWUSERS
+  local existing_au
+  local -a au_arr=()
+  HARDEN_ALLOWUSERS=""
+  existing_au="$(sshd_allowusers_tokens)"
+  if [[ -n "${existing_au}" ]]; then
+    read -ra au_arr <<< "${existing_au}"
+  fi
+  if (( ${#au_arr[@]} >= 2 )); then
+    if ask_yesno "检测到当前 sshd 已配置多个非 root AllowUsers（${existing_au}），沿用该白名单？" y; then
+      HARDEN_ALLOWUSERS="${existing_au}"
+      return 0
+    fi
+  fi
+  if [[ -z "${ADMIN_USER}" ]] || ! user_exists "${ADMIN_USER}" || ! user_is_nonroot "${ADMIN_USER}"; then
+    resolve_admin_user || true
+  fi
   need_admin || return 1
   if ! getent passwd "${ADMIN_USER}" >/dev/null 2>&1; then
     die_action "系统用户 ${ADMIN_USER} 不存在。AllowUsers 写它会让所有账号（含当前会话）下次登录被拒"
@@ -1250,6 +1315,48 @@ ssh_harden() {   # ssh_harden <目标端口>：写 drop-in + 双闸门；成功 
     die_action "SSH 加固必须使用非 root 管理员账号（UID 0 禁止）"
     return 1
   fi
+  HARDEN_ALLOWUSERS="${ADMIN_USER}"
+  return 0
+}
+
+ufw_precheck() {   # ufw_precheck <当前端口> <目标端口>：UFW active 时强制检查放行；否则要求显式确认外部防火墙
+  local cur="$1" target="$2" st
+  if command -v ufw >/dev/null 2>&1; then
+    fw_refresh
+    st="$(fw_state)"
+  else
+    st="未安装"
+  fi
+  if [[ "${st}" == "active" ]]; then
+    if ! fw_has_rule "${target}/tcp"; then
+      die_action "ufw 已启用但未放行 ${target}/tcp。请先用本菜单 2 放行（铁律：UFW 先于 sshd）"
+      return 1
+    fi
+    if [[ "${cur}" != "${target}" ]] && ! fw_has_rule "${cur}/tcp"; then
+      die_action "迁移期间旧端口 ${cur}/tcp 必须保持放行（闸门二确认前不能断退路）。请先用本菜单 2 放行"
+      return 1
+    fi
+    return 0
+  fi
+  warn "ufw 当前状态：${st}（本脚本不会自动放行外部防火墙 / nftables / iptables）"
+  if [[ "${cur}" != "${target}" ]]; then
+    warn "端口迁移期间须在云安全组或现有防火墙中同时放行新端口 ${target}/tcp，并暂留旧端口 ${cur}/tcp"
+  else
+    warn "须确保云安全组或现有防火墙已放行 ${target}/tcp"
+  fi
+  if ! ask_yesno "确认已在云安全组或其他防火墙放行 ${target}/tcp，继续 SSH 加固？" n; then
+    warn "已取消：请先放行目标端口或启用 UFW 后再加固"
+    return 1
+  fi
+  return 0
+}
+
+ssh_harden() {   # ssh_harden <目标端口>：写 drop-in + 双闸门；成功 0，拒绝 1
+  local target="$1" cur actual listening ports migration=0 HARDEN_ALLOWUSERS="" eff_now login_hint_user gate1_prompt
+  [[ -f "${SSHD_CFG}" ]] || { die_action "未找到 ${SSHD_CFG}"; return 1; }
+  grep -qiE '^[[:space:]]*Include[[:space:]]' "${SSHD_CFG}" || \
+    { die_action "需先在 sshd_config 启用 Include drop-in（本流程依赖 drop-in 覆盖）"; return 1; }
+  resolve_harden_allowusers || return 1
 
   # 旧端口：写 drop-in 之前读到的实际监听端口，只保存在本次流程变量里
   cur="$(sshd_port)"
@@ -1269,13 +1376,14 @@ ssh_harden() {   # ssh_harden <目标端口>：写 drop-in + 双闸门；成功 
   # 已达标就不重写、也不过闸门：原生配置已是目标状态时，重写只会多一次无意义备份
   local desired
   printf -v desired 'Port %s\nPermitRootLogin no\nPasswordAuthentication no\nPubkeyAuthentication yes\nAllowUsers %s\nMaxAuthTries 3' \
-    "${target}" "${ADMIN_USER}"
+    "${target}" "${HARDEN_ALLOWUSERS}"
+  eff_now="$(ssh_eff)"
   if [[ -f "${HARD}" ]] && [[ "$(cat "${HARD}")" == "${desired}" ]] \
-     && grep -qx 'passwordauthentication no' <<<"$(ssh_eff)" \
-     && grep -qx 'permitrootlogin no' <<<"$(ssh_eff)" \
-     && grep -qx "port ${target}" <<<"$(ssh_eff)" \
-     && grep -qx "allowusers ${ADMIN_USER}" <<<"$(ssh_eff)" \
-     && grep -qx 'maxauthtries 3' <<<"$(ssh_eff)"; then
+     && grep -qx 'passwordauthentication no' <<<"${eff_now}" \
+     && grep -qx 'permitrootlogin no' <<<"${eff_now}" \
+     && grep -qx "port ${target}" <<<"${eff_now}" \
+     && [[ "$(sshd_allowusers_raw "${eff_now}")" == "${HARDEN_ALLOWUSERS,,}" ]] \
+     && grep -qx 'maxauthtries 3' <<<"${eff_now}"; then
     log "SSH 加固已满足：${HARD} 与 sshd -T 生效值均已达标，未重写配置、未重启 sshd"
     return 0
   fi
@@ -1303,7 +1411,12 @@ ssh_harden() {   # ssh_harden <目标端口>：写 drop-in + 双闸门；成功 
   log "sshd -T 确认：端口 ${actual}、debug 通过"
 
   # 闸门一：密钥登录验证（铁律 2）
-  if ! ask_yesno "已在「用户」菜单后用新终端验证过 ${ADMIN_USER} 的密钥登录吗？" n; then
+  if [[ "${HARDEN_ALLOWUSERS}" == *" "* ]]; then
+    gate1_prompt="已确认白名单用户（${HARDEN_ALLOWUSERS}）均可通过密钥登录且具备 sudo 权限吗？"
+  else
+    gate1_prompt="已用新终端验证过 ${HARDEN_ALLOWUSERS%%@*} 的密钥登录吗？"
+  fi
+  if ! ask_yesno "${gate1_prompt}" n; then
     warn "先验证密钥登录再加固。本程序尚未 reload ssh，当前 ssh 配置未变，可安全返回"
     return 1
   fi
@@ -1335,13 +1448,15 @@ ssh_harden() {   # ssh_harden <目标端口>：写 drop-in + 双闸门；成功 
     fi
   fi
 
+  login_hint_user="${ADMIN_USER:-${HARDEN_ALLOWUSERS%% *}}"
+  login_hint_user="${login_hint_user%%@*}"
   printf '\n'
   log "保持【本会话】不断开！请操作："
-  log "  1) 新开终端：ssh -p ${target} ${ADMIN_USER}@<host>  —— 必须密钥登录成功且 root 被拒"
+  log "  1) 新开终端：ssh -p ${target} ${login_hint_user}@<host>  —— 必须密钥登录成功且 root 被拒"
   if (( migration == 1 )); then
     log "  2) 同步云平台安全组：关 ${cur}、开 ${target}（只能你手动做）"
   else
-    log "  2) 确认云平台安全组已放行 ${target}（本机 ufw 已放行）"
+    log "  2) 确认云平台安全组已放行 ${target}（若已启用 ufw 则本机 ufw 已放行）"
   fi
   printf '\n'
 
@@ -1351,17 +1466,17 @@ ssh_harden() {   # ssh_harden <目标端口>：写 drop-in + 双闸门；成功 
     warn "恢复指引：若已锁死，用云控制台/VNC 登录后还原 ${BK_ROOT}/ 下备份，再 systemctl reload ssh"
     return 1
   fi
-  if (( migration == 1 )); then
+  if (( migration == 1 )) && command -v ufw >/dev/null 2>&1; then
     fw_refresh
-    if fw_has_rule "${cur}/tcp"; then
+    if [[ "$(fw_state)" == "active" ]] && fw_has_rule "${cur}/tcp"; then
       # || true：删不存在的规则时 ufw 返回 1，不该因此把整个流程判失败
       ufw delete allow "${cur}/tcp" || warn "删除 ${cur}/tcp 规则失败，请手动执行：ufw delete allow ${cur}/tcp"
       log "已移除 ${cur}/tcp 临时放行规则（ufw）"
     fi
   fi
   printf '\n'
-  log "SSH 加固完成。提醒：云安全组若仍放行 ${cur}，请手动关闭。"
-  log "云厂商预置用户（如 ubuntu/admin）仍存在但已被 AllowUsers 屏蔽；确认不用可手动删除。"
+  log "SSH 加固完成。提醒：云安全组（或外部防火墙）若仍放行 ${cur}，请手动关闭。"
+  log "云厂商预置用户（如 ubuntu/admin）若不在 AllowUsers 内已被屏蔽；确认不用可手动删除。"
   return 0
 }
 
@@ -1628,17 +1743,14 @@ fw_do_change_port() {
     log "与当前生效端口相同，无需迁移"
     return 0
   fi
-  command -v ufw >/dev/null 2>&1 || { warn "未安装 ufw，先安装基础工具（菜单 2）"; return 0; }
-  fw_refresh
-  if [[ "$(fw_state)" != "active" ]]; then
-    warn "ufw 未启用：先在本菜单配置并启用防火墙（主菜单 5，铁律：UFW 先于 sshd）"
-    return 0
-  fi
-  if ! fw_has_rule "${target}/tcp"; then
-    if ! ask_yesno "ufw 未放行 ${target}/tcp，先放行再加固？" y; then return 0; fi
-    ufw allow "${target}/tcp" || { die_action "放行 ${target}/tcp 失败"; return 0; }
+  if command -v ufw >/dev/null 2>&1; then
     fw_refresh
-    log "已放行 ${target}/tcp"
+    if [[ "$(fw_state)" == "active" ]] && ! fw_has_rule "${target}/tcp"; then
+      if ! ask_yesno "ufw 未放行 ${target}/tcp，先放行再加固？" y; then return 0; fi
+      ufw allow "${target}/tcp" || { die_action "放行 ${target}/tcp 失败"; return 0; }
+      fw_refresh
+      log "已放行 ${target}/tcp"
+    fi
   fi
   ssh_harden "${target}" || return 0
   return 0
@@ -1691,17 +1803,23 @@ fw_do_restore() {
   cur="$(sshd_port)"
   if [[ -n "${newport}" && "${newport}" != "${cur}" ]]; then
     log "备份文件指定端口 ${newport}（当前 sshd 生效端口 ${cur}）"
-    fw_refresh
-    if command -v ufw >/dev/null 2>&1 && ! fw_has_rule "${newport}/tcp"; then
-      warn "ufw 未放行 ${newport}/tcp，现在重启 sshd 会锁死"
-      if ask_yesno "先放行 ${newport}/tcp 再继续？" y; then
-        ufw allow "${newport}/tcp" || { die_action "放行 ${newport}/tcp 失败，未重启 sshd"; return 0; }
-        fw_refresh
-        log "已放行 ${newport}/tcp"
-      else
-        warn "已中止，未重启 sshd；该文件将在下次 sshd 重启时生效（届时务必先放行端口）"
-        return 0
+    if command -v ufw >/dev/null 2>&1; then
+      fw_refresh
+      if [[ "$(fw_state)" == "active" ]] && ! fw_has_rule "${newport}/tcp"; then
+        warn "ufw 未放行 ${newport}/tcp，现在重启 sshd 会锁死"
+        if ask_yesno "先放行 ${newport}/tcp 再继续？" y; then
+          ufw allow "${newport}/tcp" || { die_action "放行 ${newport}/tcp 失败，未重启 sshd"; return 0; }
+          fw_refresh
+          log "已放行 ${newport}/tcp"
+        else
+          warn "已中止，未重启 sshd；该文件将在下次 sshd 重启时生效（届时务必先放行端口）"
+          return 0
+        fi
+      elif [[ "$(fw_state)" != "active" ]]; then
+        warn "ufw 未启用：若现在重启 sshd，请确保云安全组或其他防火墙已放行 ${newport}/tcp"
       fi
+    else
+      warn "未安装 ufw：若现在重启 sshd，请确保云安全组或其他防火墙已放行 ${newport}/tcp"
     fi
   fi
   if ask_yesno "现在重启 ssh 让恢复的配置生效？" n; then
@@ -1715,7 +1833,7 @@ fw_do_restore() {
 
 fw_menu() {
   local eff e_root e_pwd e_users e_tries hard_users sshp
-  resolve_admin_user || true
+  auto_detect_admin
   while :; do
     fw_refresh
     sshp="$(sshd_port)"
@@ -1726,12 +1844,12 @@ fw_menu() {
     e_tries="$(eff_val "${eff}" maxauthtries)"
     hard_users=""
     [[ -f "${HARD}" ]] && hard_users="$(sed -n 's/^AllowUsers[[:space:]]\+//p' "${HARD}" | tr -d '\r')"
-    if [[ -n "${hard_users}" && "${hard_users}" != "${ADMIN_USER:-}" ]]; then
-      e_users="${e_users} ${C_Y}（本进程管理员为 ${ADMIN_USER:-未指定}，应用加固后改为它）${C_0}"
+    if [[ -n "${hard_users}" && -n "${ADMIN_USER:-}" && "${hard_users}" != "${ADMIN_USER}" ]]; then
+      e_users="${e_users} ${C_Y}（本进程管理员为 ${ADMIN_USER}，改用单用户加固后将覆盖）${C_0}"
     fi
     scr_clear
     ui_rule
-    printf '%s UFW 与 SSH · %s%s\n' "${C_B}" "${C_G}" "${ADMIN_USER:-未指定}"
+    printf '%s UFW 与 SSH · %s%s%s\n' "${C_B}" "${C_G}" "${ADMIN_USER:-未指定}" "${C_0}"
     ui_sep
     case "$(fw_state)" in
       active) ui_kv "防火墙" "$(ui_yes 'active ✓')" ;;
@@ -1741,10 +1859,14 @@ fw_menu() {
     ui_kv "默认策略" "入站 $(fw_default_in) / 出站 $(fw_default_out)"
     ui_kv "规则数" "$(fw_rule_count)"
     if [[ -n "${sshp}" ]]; then
-      if [[ "$(fw_state)" == "active" ]] && fw_has_rule "${sshp}/tcp"; then
-        ui_kv "SSH 端口" "${sshp}（ufw 已放行 ✓）"
+      if [[ "$(fw_state)" == "active" ]]; then
+        if fw_has_rule "${sshp}/tcp"; then
+          ui_kv "SSH 端口" "${sshp}（ufw 已放行 ✓）"
+        else
+          ui_kv "SSH 端口" "${sshp}（$(ui_no 'ufw 未放行 ⚠')）"
+        fi
       else
-        ui_kv "SSH 端口" "${sshp}（ufw 未放行 ⚠）"
+        ui_kv "SSH 端口" "${sshp}（ufw $(fw_state)，依赖外部防火墙）"
       fi
     else
       ui_kv "SSH 端口" "$(ui_no '未知（sshd -T 失败）⚠')"
@@ -1822,7 +1944,7 @@ f2b_apply() {
   local port bantime findtime maxretry
   if ! f2b_installed; then
     log "安装 fail2ban……"
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban; then
+    if ! apt_install_pkgs fail2ban; then
       die_action "安装 fail2ban 失败（检查网络与软件源）"
       return 1
     fi
@@ -1874,6 +1996,10 @@ f2b_do_status() {
 
 f2b_do_params() {
   local cur_b cur_f cur_m v
+  if ! f2b_installed; then
+    warn "fail2ban 尚未安装：请先选 1 安装并初始化"
+    return 0
+  fi
   cur_b="$(f2b_param bantime 86400)"
   cur_f="$(f2b_param findtime 600)"
   cur_m="$(f2b_param maxretry 3)"
@@ -3217,6 +3343,7 @@ do_standard_init() {
 # ============ 主菜单 ============
 draw_main_menu() {
   local sshp keys admin_ok=0
+  auto_detect_admin
   sshp="$(sshd_port)"
   keys="$(ak_count)"
   fw_refresh
@@ -3233,7 +3360,7 @@ draw_main_menu() {
   if [[ -n "${ADMIN_USER}" ]] && user_exists "${ADMIN_USER}"; then admin_ok=1; fi
   if (( admin_ok )); then ui_kv "管理员" "${ADMIN_USER}"
   elif [[ -n "${ADMIN_USER}" ]]; then ui_kv "管理员" "$(ui_no "${ADMIN_USER}（不存在）⚠")"
-  else ui_kv "管理员" "${C_D}未确定（进入用户菜单时选择）${C_0}"; fi
+  else ui_kv "管理员" "${C_D}未确定（按需选择）${C_0}"; fi
   if (( admin_ok )) && [[ "${keys}" -gt 0 ]]; then ui_kv "公钥" "${keys} 把"
   elif (( admin_ok )); then ui_kv "公钥" "$(ui_no '0 把 ⚠')"
   else ui_kv "公钥" "${C_D}—${C_0}"; fi
