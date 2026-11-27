@@ -25,6 +25,7 @@ BBR_CONF="/etc/sysctl.d/99-bbr.conf"
 
 BASE="sudo ca-certificates curl wget gnupg ufw fail2ban unattended-upgrades vim nano unzip htop needrestart ncdu mtr-tiny bind9-dnsutils"
 TOOLS_EXTRA_DEFAULT="jq tmux lsof rsync zip"
+LINUXMIRRORS_URL="https://linuxmirrors.cn/main.sh"
 
 # 本次进程内的管理员用户（不落盘；来源见 resolve_admin_user）
 ADMIN_USER=""
@@ -2822,21 +2823,57 @@ verify_menu() {
   done
 }
 mirror_instructions() {
-  printf '  第三方来源：SuperManito 的 LinuxMirrors（https://linuxmirrors.cn/main.sh）\n'
-  printf '  本项目不提供或维护该脚本，也未对当前在线版本完成全量安全审计。\n'
+  printf '  第三方来源：SuperManito 的 LinuxMirrors（%s）\n' "${LINUXMIRRORS_URL}"
+  printf '  免责声明：本项目不提供或维护该脚本，也未对当前在线版本完成全量安全审计。\n'
   printf '  只有在你自行审阅并接受以 root 执行第三方代码的风险后才运行。\n'
-  printf '  运行前确认已创建 Snapshot；在另一个 root 终端执行：\n'
-  printf '    bash <(curl -fsSL https://linuxmirrors.cn/main.sh)\n'
-  printf '  若随后继续本流程，在第三方脚本中选择不升级软件包；本流程稍后会处理升级。\n'
+  printf '  运行前确认已创建 Snapshot；对应命令：\n'
+  printf '    bash <(curl -fsSL %s)\n' "${LINUXMIRRORS_URL}"
+  printf '  若随后继续本流程，请在第三方脚本中选择不升级软件包；本流程稍后会处理升级。\n'
+}
+
+mirror_execute_linuxmirrors() {
+  local tmp rc=0
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "缺少 curl 命令，无法自动拉取换源脚本"
+    if ! ask_yesno "现在安装 curl？" y; then
+      die_action "已取消（请先安装 curl 或手动换源）"
+      return 1
+    fi
+    apt_update_index || return 1
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y curl; then
+      die_action "安装 curl 失败"
+      return 1
+    fi
+  fi
+  tmp="$(mktemp /tmp/linuxmirrors.XXXXXX.sh)" || { die_action "创建临时脚本失败"; return 1; }
+  log "拉取 ${LINUXMIRRORS_URL}"
+  if ! curl -fsSL -o "${tmp}" "${LINUXMIRRORS_URL}" || [[ ! -s "${tmp}" ]]; then
+    rm -f -- "${tmp}"
+    die_action "下载换源脚本失败（检查网络或手动执行上方命令）"
+    return 1
+  fi
+  bash "${tmp}" || rc=$?
+  rm -f -- "${tmp}"
+  if (( rc != 0 )); then
+    die_action "换源脚本退出异常（exit ${rc}）"
+    return 1
+  fi
+  log "系统换源脚本执行完成"
+  return 0
 }
 
 mirror_info_menu() {
   scr_clear
   ui_rule
-  printf '%s 软件源（第三方脚本）%s\n' "${C_B}" "${C_0}"
+  printf '%s 系统换源（LinuxMirrors 第三方脚本）%s\n' "${C_B}" "${C_0}"
   ui_sep
   mirror_instructions
   ui_sep
+  if ask_yesno "已阅读以上免责声明并自愿承担风险，是否立即执行换源命令？" n; then
+    mirror_execute_linuxmirrors || true
+  else
+    log "未自动执行；如需手动运行可复制上方命令"
+  fi
   page_wait "按回车返回主菜单…"
 }
 
@@ -2940,7 +2977,7 @@ do_standard_init() {
   printf '  按步骤引导：系统更新 → 时区/NTP → 用户/密钥 → UFW/SSH → fail2ban → Swap → BBR → 终检\n'
   printf '  %s每一步只修改未达标项；任何安全检查失败都会中止剩余步骤。%s\n' "${C_D}" "${C_0}"
   ui_sep
-  if ask_yesno "标准初始化开始前是否换源？只会在 Snapshot 确认后提示你手动运行第三方脚本。" n; then
+  if ask_yesno "标准初始化开始前是否换源（将在 Snapshot 确认后展示命令并询问执行）？" n; then
     change_sources=1
   fi
 
@@ -2962,12 +2999,16 @@ do_standard_init() {
     return 1
   fi
   if (( change_sources )); then
-    printf '\n%s== 可选准备步骤 · 手动换源 ==%s\n' "${C_B}" "${C_0}"
+    printf '\n%s== 可选准备步骤 · 系统换源 ==%s\n' "${C_B}" "${C_0}"
     mirror_instructions
-    scr_pause "请在另一个 root 终端完成后返回此窗口（Ctrl-C 中止）…"
-    if ! ask_yesno "换源已完成，且第三方脚本未升级软件包？" n; then
-      flow_abort "未确认换源完成，未继续系统更新"
-      return 1
+    if ask_yesno "已阅读以上免责声明并自愿承担风险，是否立即执行换源命令？" n; then
+      mirror_execute_linuxmirrors || { flow_abort "换源脚本未成功完成，未继续系统更新"; return 1; }
+    else
+      scr_pause "未自动执行；如你在另一终端手动换源，完成后按回车（Ctrl-C 中止）…"
+      if ! ask_yesno "换源已完成（且第三方脚本未升级软件包），继续系统更新？" n; then
+        flow_abort "未确认换源完成，未继续系统更新"
+        return 1
+      fi
     fi
   fi
 
@@ -3207,7 +3248,7 @@ draw_main_menu() {
   ui_kv "自动更新" "$(ua_state)"
   ui_sep
   ui_item 0 "标准初始化（按顺序引导全流程）"
-  ui_item 1 "换源（第三方脚本说明；不自动执行）"
+  ui_item 1 "系统换源（LinuxMirrors 第三方脚本）"
   ui_item 2 "系统更新与基础工具"
   ui_item 3 "时区"
   ui_item 4 "用户、密码、sudo 和密钥"

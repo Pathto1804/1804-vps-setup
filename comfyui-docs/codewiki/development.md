@@ -48,8 +48,9 @@ bash tools/sync_check.sh          # 必须输出「一致性 OK」
 | PyPI `torch 2.15.0` 元数据依赖 `nvidia-*-cu13`，即 CUDA 13 | GPU 模式要求驱动 >=580；运行时用 `torch.version.cuda` 复核 |
 | CPU 索引的 torchvision 可能停留在旧版本（0.21.0+cpu），与最新 CPU torch 不一定同版 | CPU 模式让 pip 从 CPU 索引自行解析兼容组合；只用于流程/UI 测试 |
 | 容器实例 PID 1 不是 systemd | 自启写 `/start.d/comfyui.sh`；不要用 systemctl |
-| 驱动装完不重启，torch 装了也跑不起来 | 驱动安装后停流程，提示 reboot；不自动重启 |
-| 默认 listen 无鉴权 | 标准部署开头打印一次风险；菜单 7 保留隧道后备 |
+| 驱动装完不重启，torch 装了也跑起来会报错 | 驱动安装/升级有包变更时停流程并提示 reboot；无变更（已是最新或取消）不误停 |
+| 非 dpkg（`.run`）或容器透传驱动不能直接用 apt 覆盖 | 驱动操作前查 `dpkg -S nvidia-smi` 与 `systemd_present`，默认拒绝盲目覆盖 |
+| 默认 listen 无鉴权 | 标准部署开头打印一次风险；菜单 7 保留隧道后备与独立 UFW 放行 |
 
 ## 真机验收
 

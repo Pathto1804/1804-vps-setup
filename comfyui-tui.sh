@@ -24,6 +24,7 @@ PIP_MIRROR="https://mirrors.aliyun.com/pypi/simple/"
 PIP_MIRROR_FALLBACK="https://pypi.tuna.tsinghua.edu.cn/simple"
 CPU_INDEX="https://download.pytorch.org/whl/cpu"
 CPU_INDEX_FALLBACK="https://mirror.nju.edu.cn/pytorch/whl/cpu"
+LINUXMIRRORS_URL="https://linuxmirrors.cn/main.sh"
 
 MINIFORGE_DIR="${ROOT_HOME}/miniforge3"
 CONDA_BIN="${MINIFORGE_DIR}/bin/conda"
@@ -45,10 +46,13 @@ PORT=8188
 CPU_MODE=0
 ACCESS_MODE=""
 PY_VER="3.13"
+CUSTOM_TARGET_SET=0
+DRIVER_CHANGED=0
 TMPD=""
 UI_REPLY=""
 DW=0
 declare -a COMFY_ARGS=()
+declare -a COMFY_EXTRA_ARGS=()
 
 if [[ -t 1 ]]; then
   C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'; C_B=$'\e[1m'; C_D=$'\e[90m'; C_0=$'\e[0m'
@@ -191,6 +195,8 @@ v_nonempty() { [[ -n "$1" ]] || { printf '不能为空\n' >&2; return 1; }; }
 v_pyver() { [[ "$1" =~ ^3\.(12|13)$ ]] || { printf '仅支持 3.12 / 3.13\n' >&2; return 1; }; }
 v_action() { [[ "$1" =~ ^(start|stop|restart|status)$ ]] || { printf '仅支持 start/stop/restart/status\n' >&2; return 1; }; }
 v_dir() { [[ -d "$1" ]] || { printf '目录不存在：%s\n' "$1" >&2; return 1; }; }
+v_pybin() { [[ -x "$1" ]] && "$1" --version >/dev/null 2>&1 || { printf '可执行 Python 无效：%s\n' "$1" >&2; return 1; }; }
+v_comfy_dir() { [[ -f "$1/main.py" ]] || { printf '未在该目录找到 main.py：%s\n' "$1" >&2; return 1; }; }
 
 # 显示宽度：CJK/全角按 2 列
 _disp_w() {
@@ -288,6 +294,36 @@ apt_update_index() {
     return 1
   fi
   return 0
+}
+
+ensure_cmd() {
+  local cmd="$1" pkg="${2:-$1}"
+  command -v "${cmd}" >/dev/null 2>&1 && return 0
+  warn "缺少命令 ${cmd}（安装包：${pkg}）"
+  if ! ask_yesno "现在单独安装 ${pkg}？" y; then
+    die_action "缺少 ${cmd}，已取消（也可在菜单 2 安装基础包）"
+    return 1
+  fi
+  apt_update_index || return 1
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkg}"; then
+    die_action "安装 ${pkg} 失败"
+    return 1
+  fi
+  return 0
+}
+
+fetch_file() {
+  local url="$1" out="$2"
+  if command -v wget >/dev/null 2>&1; then
+    wget -c -O "${out}" "${url}"
+    return $?
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    curl -fSL -o "${out}" "${url}"
+    return $?
+  fi
+  ensure_cmd curl curl || return 1
+  curl -fSL -o "${out}" "${url}"
 }
 
 install_base_packages() {
@@ -419,19 +455,148 @@ config_has_cpu() {
   [[ -n "${f}" ]] && grep -q -- '--cpu' "${f}"
 }
 
+sync_env_bin() {
+  ENV_BIN="$(dirname "${ENV_PY}")"
+  if [[ "${ENV_PY}" == */envs/*/bin/python ]]; then
+    ENV_DIR="${ENV_PY%/bin/python}"
+  fi
+}
+
+parse_unit_workdir() {
+  local line
+  [[ -f "${UNIT_FILE}" ]] || return 0
+  line="$(awk -F= '/^WorkingDirectory=/{sub(/^[[:space:]]+/, "", $2); print $2; exit}' "${UNIT_FILE}" 2>/dev/null || true)"
+  printf '%s' "${line}"
+}
+
+parse_startd_workdir() {
+  local line
+  [[ -f "${STARTD_FILE}" ]] || return 0
+  line="$(sed -n 's/^cd "\([^"]*\)".*/\1/p' "${STARTD_FILE}" 2>/dev/null || true)"
+  printf '%s' "${line%%$'\n'*}"
+}
+
+parse_config_python() {
+  local line py=""
+  if [[ -f "${UNIT_FILE}" ]]; then
+    line="$(awk -F= '/^ExecStart=/{sub(/^[[:space:]]+/, "", $2); print $2; exit}' "${UNIT_FILE}" 2>/dev/null || true)"
+    py="${line%% *}"
+  elif [[ -f "${STARTD_FILE}" ]]; then
+    line="$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "${STARTD_FILE}" 2>/dev/null || true)"
+    py="${line%%$'\n'*}"
+  fi
+  py="${py#\"}"
+  py="${py%\"}"
+  if [[ -n "${py}" && -x "${py}" ]]; then
+    printf '%s' "${py}"
+  fi
+}
+
+discover_conda_bin() {
+  local cand
+  for cand in "${CONDA_BIN}" "${ROOT_HOME}/miniforge3/bin/conda" "${ROOT_HOME}/miniconda3/bin/conda" "${ROOT_HOME}/anaconda3/bin/conda" "/opt/conda/bin/conda"; do
+    if [[ -x "${cand}" ]]; then
+      printf '%s' "${cand}"
+      return 0
+    fi
+  done
+  cand="$(command -v conda 2>/dev/null || true)"
+  if [[ -n "${cand}" && -x "${cand}" ]]; then
+    printf '%s' "${cand}"
+    return 0
+  fi
+  return 1
+}
+
+discover_native_context() {
+  local d py cbin envline
+  (( CUSTOM_TARGET_SET )) && return 0
+
+  # 1. ComfyUI 目录探测：已配置服务 -> 默认路径 -> 常见数据盘路径
+  d="$(parse_unit_workdir)"
+  [[ -n "${d}" && -d "${d}" ]] || d="$(parse_startd_workdir)"
+  if [[ -n "${d}" && -d "${d}" ]]; then
+    COMFY_DIR="${d}"
+  elif [[ -f "${ROOT_HOME}/ComfyUI/main.py" || -d "${ROOT_HOME}/ComfyUI/.git" ]]; then
+    COMFY_DIR="${ROOT_HOME}/ComfyUI"
+  else
+    for d in "${ROOT_HOME}/autodl-tmp/ComfyUI" "/workspace/ComfyUI" "/data/ComfyUI" "/opt/ComfyUI"; do
+      if [[ -f "${d}/main.py" ]]; then
+        COMFY_DIR="${d}"
+        break
+      fi
+    done
+  fi
+
+  # 2. conda 二进制探测
+  cbin="$(discover_conda_bin || true)"
+  if [[ -n "${cbin}" ]]; then
+    CONDA_BIN="${cbin}"
+    MINIFORGE_DIR="$(dirname "$(dirname "${CONDA_BIN}")")"
+    if [[ -x "${MINIFORGE_DIR}/bin/mamba" ]]; then
+      MAMBA_BIN="${MINIFORGE_DIR}/bin/mamba"
+    fi
+  fi
+
+  # 3. Python 解释器探测：已配置服务 -> miniforge 默认 env -> ComfyUI/venv -> 已注册 conda env
+  py="$(parse_config_python || true)"
+  if [[ -z "${py}" ]]; then
+    for d in \
+      "${MINIFORGE_DIR}/envs/comfyui/bin/python" \
+      "${ROOT_HOME}/miniforge3/envs/comfyui/bin/python" \
+      "${COMFY_DIR}/venv/bin/python" \
+      "${COMFY_DIR}/.venv/bin/python" \
+      "${MINIFORGE_DIR}/envs/comfy/bin/python"
+    do
+      if [[ -x "${d}" ]]; then
+        py="${d}"
+        break
+      fi
+    done
+  fi
+  if [[ -z "${py}" && -f "${ROOT_HOME}/.conda/environments.txt" ]]; then
+    while IFS= read -r envline; do
+      [[ -n "${envline}" ]] || continue
+      if [[ "${envline}" == */comfyui || "${envline}" == */comfy ]] && [[ -x "${envline}/bin/python" ]]; then
+        py="${envline}/bin/python"
+        break
+      fi
+    done < "${ROOT_HOME}/.conda/environments.txt"
+  fi
+  if [[ -n "${py}" && -x "${py}" ]]; then
+    ENV_PY="${py}"
+    sync_env_bin
+  fi
+  return 0
+}
+
 env_py() { HOME="${ROOT_HOME}" "${ENV_PY}" "$@"; }
-miniforge_ok() {
+conda_ok() {
   [[ -x "${CONDA_BIN}" ]] && "${CONDA_BIN}" --version >/dev/null 2>&1
 }
+miniforge_ok() { conda_ok; }
 env_ok() {
   [[ -x "${ENV_PY}" ]] && env_py --version >/dev/null 2>&1
 }
 env_python_version() {
-  if env_ok; then env_py --version 2>&1; else printf '未创建'; fi
+  if env_ok; then env_py --version 2>&1; else printf '未创建/未选择'; fi
 }
-comfy_ok() { [[ -d "${COMFY_DIR}/.git" ]]; }
+comfy_present() { [[ -f "${COMFY_DIR}/main.py" ]]; }
+comfy_git_ok() { [[ -d "${COMFY_DIR}/.git" ]]; }
+comfy_ok() { comfy_present || comfy_git_ok; }
 comfy_commit() {
-  if comfy_ok; then git -C "${COMFY_DIR}" rev-parse --short HEAD 2>/dev/null || true; fi
+  if comfy_git_ok; then git -C "${COMFY_DIR}" rev-parse --short HEAD 2>/dev/null || true; fi
+}
+comfy_summary() {
+  local c
+  if comfy_git_ok; then
+    c="$(comfy_commit)"
+    printf '%s (%s)' "${c:-git}" "${COMFY_DIR}"
+  elif comfy_present; then
+    printf '非Git (%s)' "${COMFY_DIR}"
+  else
+    printf '未安装'
+  fi
 }
 pip_version() {
   local pkg="$1" out
@@ -477,15 +642,93 @@ nvidia_repo_name() {
   esac
 }
 
+nvidia_repo_configured() {
+  grep -rnq "developer.download.nvidia.com/compute/cuda/repos" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null
+}
+
+driver_dpkg_owner() {
+  local smi real out
+  smi="$(command -v nvidia-smi 2>/dev/null || true)"
+  [[ -n "${smi}" ]] || return 0
+  real="$(readlink -f "${smi}" 2>/dev/null || printf '%s' "${smi}")"
+  out="$(dpkg -S "${real}" 2>/dev/null || dpkg -S "${smi}" 2>/dev/null || true)"
+  printf '%s' "${out%%:*}"
+}
+
+driver_installed_pkg() {
+  local out pkg ver st first_driver=""
+  out="$(dpkg-query -W -f='${Package}\t${Version}\t${Status}\n' 'nvidia-open' 'cuda-drivers' 'nvidia-driver-*' 2>/dev/null || true)"
+  while IFS=$'\t' read -r pkg ver st; do
+    [[ "${st}" == *"install ok installed"* ]] || continue
+    if [[ "${pkg}" == "nvidia-open" || "${pkg}" == "cuda-drivers" ]]; then
+      printf '%s' "${pkg}"
+      return 0
+    fi
+    if [[ -z "${first_driver}" && "${pkg}" =~ ^nvidia-driver-[0-9]+(-open)?$ ]]; then
+      first_driver="${pkg}"
+    fi
+  done <<< "${out}"
+  printf '%s' "${first_driver}"
+}
+
+apt_pkg_policy() {
+  local pkg="$1" out inst cand
+  out="$(LC_ALL=C apt-cache policy "${pkg}" 2>/dev/null || true)"
+  inst="$(awk '/^[[:space:]]*Installed:/ {print $2; exit}' <<< "${out}")"
+  cand="$(awk '/^[[:space:]]*Candidate:/ {print $2; exit}' <<< "${out}")"
+  [[ "${inst}" == "(none)" ]] && inst=""
+  [[ "${cand}" == "(none)" ]] && cand=""
+  printf '%s|%s' "${inst}" "${cand}"
+}
+
+driver_flavor_label() {
+  local pkg owner
+  pkg="$(driver_installed_pkg)"
+  if [[ -n "${pkg}" ]]; then
+    printf '%s (dpkg)' "${pkg}"
+    return 0
+  fi
+  if gpu_driver_ready; then
+    owner="$(driver_dpkg_owner)"
+    if [[ -n "${owner}" ]]; then
+      printf '%s (dpkg)' "${owner}"
+    else
+      printf '非dpkg(.run或宿主机透传)'
+    fi
+    return 0
+  fi
+  printf '未安装'
+}
+
+driver_guard_environment() {
+  if ! systemd_present && gpu_driver_ready; then
+    warn "检测到非 systemd 环境（疑似容器实例）且 nvidia-smi 已就绪；容器驱动通常由宿主机提供"
+    if ! ask_yesno "仍要在当前环境继续安装/升级驱动？" n; then
+      log "已取消驱动操作"
+      return 1
+    fi
+  fi
+  if gpu_driver_ready && [[ -z "$(driver_dpkg_owner)" ]]; then
+    warn "检测到 nvidia-smi 不归属于任何 apt/dpkg 包（疑似 .run 手动安装或宿主机透传）"
+    warn "直接通过 apt 安装/升级可能与现有内核模块冲突并破坏驱动！"
+    if ! ask_yesno "确认仍继续通过 apt 安装/升级驱动（建议先确认 Snapshot）？" n; then
+      die_action "已中止，避免覆盖非 dpkg 驱动"
+      return 1
+    fi
+  fi
+  return 0
+}
+
 nvidia_repo_setup() {
   local repo keyring
-  if ! command -v wget >/dev/null 2>&1; then
-    die_action "wget 未安装，先完成菜单 2 的基础包安装"
-    return 1
+  if nvidia_repo_configured; then
+    log "NVIDIA 官方源已配置（刷新索引）"
+    apt_update_index || return 1
+    return 0
   fi
   repo="$(nvidia_repo_name)" || { die_action "当前发行版不支持 NVIDIA 官方源"; return 1; }
   keyring="${TMPD}/cuda-keyring.deb"
-  if ! wget -O "${keyring}" "https://developer.download.nvidia.com/compute/cuda/repos/${repo}/x86_64/cuda-keyring_1.1-1_all.deb"; then
+  if ! fetch_file "https://developer.download.nvidia.com/compute/cuda/repos/${repo}/x86_64/cuda-keyring_1.1-1_all.deb" "${keyring}"; then
     die_action "下载 cuda-keyring 失败"
     return 1
   fi
@@ -499,35 +742,125 @@ nvidia_repo_setup() {
   return 0
 }
 
-driver_install_path_a() {
-  local out max
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-drivers-common; then
-    die_action "安装 ubuntu-drivers-common 失败"
+v_driver_branch() { [[ "$1" =~ ^[0-9]{3}$ ]] || { printf '请输入 3 位数字大版本号（如 580、590）\n' >&2; return 1; }; }
+v_choice_three() { [[ "$1" =~ ^(1|2|3)$ ]] || { printf '请输入 1、2 或 3\n' >&2; return 1; }; }
+
+driver_apt_install_pkg() {
+  local pkg="$1" pol inst cand
+  pol="$(apt_pkg_policy "${pkg}")"
+  inst="${pol%%|*}"
+  cand="${pol#*|}"
+  if [[ -z "${cand}" ]]; then
+    die_action "软件源中未找到 ${pkg}（检查分支号或 apt 源）"
     return 1
+  fi
+  if [[ -n "${inst}" && "${inst}" == "${cand}" ]]; then
+    log "${pkg} 当前已是源内最新稳定版（${inst}）"
+    if ! ask_yesno "是否仍强制重装 ${pkg}？" n; then
+      DRIVER_CHANGED=0
+      return 0
+    fi
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall "${pkg}"; then
+      die_action "重装 ${pkg} 失败"
+      return 1
+    fi
+    DRIVER_CHANGED=1
+    return 0
+  fi
+  printf '  目标包：%s（当前：%s -> 候选：%s）\n' "${pkg}" "${inst:-未安装}" "${cand}"
+  if ! ask_yesno "确认安装/升级到 ${pkg} (${cand})？" y; then
+    DRIVER_CHANGED=0
+    log "已取消驱动安装/升级"
+    return 0
+  fi
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkg}"; then
+    die_action "安装/升级 ${pkg} 失败"
+    return 1
+  fi
+  DRIVER_CHANGED=1
+  return 0
+}
+
+driver_install_path_a() {
+  local out max branches target_branch pkg pol inst cand suffix="" cur_pkg
+  if ! command -v ubuntu-drivers >/dev/null 2>&1; then
+    apt_update_index || return 1
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-drivers-common; then
+      die_action "安装 ubuntu-drivers-common 失败"
+      return 1
+    fi
   fi
   out="$(ubuntu-drivers devices 2>/dev/null || true)"
   printf '%s\n' "${out}"
-  max="$(sed -n 's/.*nvidia-driver-\([0-9][0-9]*\).*/\1/p' <<< "${out}" | sort -n | tail -n 1)"
+  branches="$(sed -n 's/.*nvidia-driver-\([0-9][0-9]*\).*/\1/p' <<< "${out}" | sort -nu)"
+  max="$(tail -n 1 <<< "${branches}")"
   if [[ -z "${max}" ]] || (( max < 580 )); then
     warn "系统源最高驱动：${max:-未知}（低于 580），改走 NVIDIA 官方源"
     driver_install_path_b || return 1
     return 0
   fi
-  if ! ask_yesno "安装系统推荐驱动 nvidia-driver-${max}？" y; then
-    die_action "已取消驱动安装"
-    return 1
+  cur_pkg="$(driver_installed_pkg)"
+  if [[ "${cur_pkg}" == *-open ]]; then
+    suffix="-open"
   fi
-  if ! DEBIAN_FRONTEND=noninteractive ubuntu-drivers install; then
-    die_action "ubuntu-drivers install 失败"
-    return 1
+  local avail_branches
+  avail_branches="$(awk '$1>=580{printf "%s ", $1}' <<< "${branches}")"
+  target_branch="$(ask_input_def "Ubuntu 系统源目标大版本（可用 >=580：${avail_branches}）" v_driver_branch "${max}")" || return 1
+  pkg="nvidia-driver-${target_branch}${suffix}"
+  pol="$(apt_pkg_policy "${pkg}")"
+  inst="${pol%%|*}"
+  cand="${pol#*|}"
+  if [[ -z "${cand}" && -n "${suffix}" ]]; then
+    pkg="nvidia-driver-${target_branch}"
+    pol="$(apt_pkg_policy "${pkg}")"
+    inst="${pol%%|*}"
+    cand="${pol#*|}"
   fi
+  if [[ -n "${inst}" && "${inst}" == "${cand}" ]]; then
+    log "Ubuntu 系统源 ${pkg} 已是最新（${inst}）"
+    if ask_yesno "改用 NVIDIA 官方源检查是否有更新的稳定版本？" n; then
+      driver_install_path_b || return 1
+      return 0
+    fi
+    DRIVER_CHANGED=0
+    return 0
+  fi
+  driver_apt_install_pkg "${pkg}" || return 1
   return 0
 }
 
 driver_install_path_b() {
+  local cur_pkg pol_open pol_cuda def="1" mode branch pkg
   nvidia_repo_setup || return 1
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-open; then
-    warn "nvidia-open 安装失败。Volta 及更老 GPU 可改用手动命令：sudo apt install -y cuda-drivers"
+  cur_pkg="$(driver_installed_pkg)"
+  pol_open="$(apt_pkg_policy nvidia-open)"
+  pol_cuda="$(apt_pkg_policy cuda-drivers)"
+  printf '\nNVIDIA 官方源最新稳定候选：\n'
+  printf '  1) nvidia-open  （开源内核模块，Turing+ 推荐） 当前: %-16s 候选: %s\n' "${pol_open%%|*}" "${pol_open#*|}"
+  printf '  2) cuda-drivers （官方闭源/全兼容稳定版）        当前: %-16s 候选: %s\n' "${pol_cuda%%|*}" "${pol_cuda#*|}"
+  printf '  3) 指定驱动大版本号（如 580 / 590）\n'
+  if [[ "${cur_pkg}" == "cuda-drivers" ]]; then def="2"; fi
+  mode="$(ask_input_def "选择安装/升级方式" v_choice_three "${def}")" || return 1
+  case "${mode}" in
+    1) pkg="nvidia-open" ;;
+    2) pkg="cuda-drivers" ;;
+    3)
+      branch="$(ask_input_def "输入驱动大版本号（>=580）" v_driver_branch "580")" || return 1
+      if (( branch < 580 )); then
+        die_action "v1 要求驱动 >=580，拒绝安装 ${branch}"
+        return 1
+      fi
+      if ask_yesno "使用开源内核模块分支（nvidia-open-${branch}）？选 n 则装 cuda-drivers-${branch}" y; then
+        pkg="nvidia-open-${branch}"
+      else
+        pkg="cuda-drivers-${branch}"
+      fi
+      ;;
+  esac
+  if ! driver_apt_install_pkg "${pkg}"; then
+    if [[ "${pkg}" == nvidia-open* ]]; then
+      warn "nvidia-open 安装失败。Volta 及更老 GPU 或部分云环境可改选 2) cuda-drivers"
+    fi
     return 1
   fi
   return 0
@@ -535,10 +868,13 @@ driver_install_path_b() {
 
 driver_install_action() {
   local choice="2"
+  DRIVER_CHANGED=0
+  printf '  当前驱动：%s / %s（CUDA %s）\n' "$(gpu_driver_version)" "$(driver_flavor_label)" "$(gpu_cuda_version)"
+  driver_guard_environment || return 1
   if is_ubuntu; then
-    printf '  1) Ubuntu 系统源（优先，版本需 >=580）\n'
-    printf '  2) NVIDIA 官方源（nvidia-open）\n'
-    choice="$(ask_input_def "选择驱动来源" v_choice_driver "1")" || return 1
+    printf '  1) Ubuntu 系统源（支持 >=580 分支）\n'
+    printf '  2) NVIDIA 官方源（最新稳定版 / 可选版本）\n'
+    choice="$(ask_input_def "选择驱动来源" v_choice_driver "2")" || return 1
   else
     log "Debian 无 ubuntu-drivers，直接使用 NVIDIA 官方源"
   fi
@@ -547,20 +883,35 @@ driver_install_action() {
     2) driver_install_path_b || return 1 ;;
     *) die_action "无效选择"; return 1 ;;
   esac
-  warn "驱动已安装：必须重启后新版驱动才会生效"
+  if (( DRIVER_CHANGED )); then
+    warn "驱动已安装/更新：必须重启后新版驱动才会生效"
+  fi
   return 0
 }
 v_choice_driver() { [[ "$1" =~ ^(1|2)$ ]] || { printf '请输入 1 或 2\n' >&2; return 1; }; }
 
 cuda_toolkit_install() {
-  if ! command -v nvcc >/dev/null 2>&1; then
+  local nvcc_ver="未安装" pol inst cand
+  if command -v nvcc >/dev/null 2>&1; then
+    nvcc_ver="$(nvcc --version 2>/dev/null | awk '/release/ {for(i=1;i<=NF;i++) if($i=="release"){print $(i+1); exit}}' || true)"
+    nvcc_ver="${nvcc_ver%,}"
+  else
     warn "未检测到 nvcc；安装 cuda-toolkit 仅用于本地编译 sageattention/flash-attn 等插件"
   fi
-  if ! ask_yesno "安装系统级 cuda-toolkit（体积较大）？" n; then
+  printf '  当前 nvcc：%s\n' "${nvcc_ver:-未知}"
+  if ! ask_yesno "检查并安装/升级系统级 cuda-toolkit（体积较大）？" n; then
     log "已取消 cuda-toolkit 安装"
     return 0
   fi
   nvidia_repo_setup || return 1
+  pol="$(apt_pkg_policy cuda-toolkit)"
+  inst="${pol%%|*}"
+  cand="${pol#*|}"
+  printf '  cuda-toolkit 当前：%s -> 候选：%s\n' "${inst:-未安装}" "${cand:-未知}"
+  if [[ -n "${inst}" && "${inst}" == "${cand}" ]]; then
+    log "cuda-toolkit 已是最新（${inst}）"
+    if ! ask_yesno "仍重装 cuda-toolkit？" n; then return 0; fi
+  fi
   if ! DEBIAN_FRONTEND=noninteractive apt-get install -y cuda-toolkit; then
     die_action "cuda-toolkit 安装失败"
     return 1
@@ -572,20 +923,27 @@ cuda_toolkit_install() {
       die_action "写入 ${bashrc} 失败"; return 1;
     }
   fi
-  log "cuda-toolkit 已安装；重新登录 SSH 后 nvcc 指向 /usr/local/cuda"
+  log "cuda-toolkit 已安装/更新；重新登录 SSH 后 nvcc 指向 /usr/local/cuda"
   return 0
 }
 
-# 返回：0 继续；1 失败；2 驱动已安装，必须重启后续跑
+# 返回：0 继续；1 失败；2 驱动已安装或升级，必须重启后续跑
 detect_or_install_driver() {
   local cv major
+  DRIVER_CHANGED=0
   if gpu_hardware_present; then
     CPU_MODE=0
     if gpu_driver_ready; then
       cv="$(gpu_cuda_version)"
       major="$(cuda_major "${cv}")"
       if [[ -n "${major}" ]] && (( major >= 13 )); then
-        log "GPU：$(gpu_name)；驱动 $(gpu_driver_version)；CUDA ${cv}（满足）"
+        log "GPU：$(gpu_name)；驱动 $(gpu_driver_version) [$(driver_flavor_label)]；CUDA ${cv}（满足）"
+        if systemd_present && ask_yesno "驱动已满足要求，是否检查并升级到更新的稳定版本？" n; then
+          driver_install_action || return 1
+          if (( DRIVER_CHANGED )); then
+            return 2
+          fi
+        fi
         return 0
       fi
       warn "驱动 CUDA ${cv:-未知} 低于 13.0（驱动 <580），v1 不支持 cu126 回退"
@@ -594,12 +952,14 @@ detect_or_install_driver() {
         return 1
       fi
       driver_install_action || return 1
-      return 2
+      (( DRIVER_CHANGED )) && return 2
+      return 0
     fi
     warn "检测到 NVIDIA 硬件，但 nvidia-smi 不可用（驱动未安装或未加载）"
     if ask_yesno "现在安装驱动？安装后必须重启" y; then
       driver_install_action || return 1
-      return 2
+      (( DRIVER_CHANGED )) && return 2
+      return 0
     fi
     if ask_yesno "不装驱动，改用 CPU 测试模式继续？" n; then
       CPU_MODE=1
@@ -663,25 +1023,21 @@ conda_init_bash() {
 
 miniforge_install() {
   local installer
-  if ! command -v wget >/dev/null 2>&1; then
-    die_action "wget 未安装，先完成菜单 2 的基础包安装"
-    return 1
-  fi
   if miniforge_ok; then
-    log "Miniforge 已安装（已满足）：$("${CONDA_BIN}" --version 2>/dev/null || true)"
+    log "Miniforge/conda 已安装（已满足）：$("${CONDA_BIN}" --version 2>/dev/null || true)"
     conda_init_bash
     condarc_write || return 1
     return 0
   fi
   installer="${TMPD}/miniforge.sh"
   log "下载 Miniforge（清华镜像）"
-  if ! wget -c -O "${installer}" "${MINIFORGE_URL}"; then
+  if ! fetch_file "${MINIFORGE_URL}" "${installer}"; then
     warn "清华 Miniforge 下载失败"
     if ! ask_yesno "改用 GitHub 官方地址重试？" y; then
       die_action "已取消 Miniforge 安装"
       return 1
     fi
-    if ! wget -c -O "${installer}" "${MINIFORGE_FALLBACK}"; then
+    if ! fetch_file "${MINIFORGE_FALLBACK}" "${installer}"; then
       die_action "Miniforge 下载失败"
       return 1
     fi
@@ -705,19 +1061,47 @@ miniforge_install() {
   return 0
 }
 
+conda_update_action() {
+  if ! conda_ok; then
+    die_action "未检测到可用的 conda/Miniforge"
+    return 1
+  fi
+  log "当前：$("${CONDA_BIN}" --version 2>/dev/null || true)"
+  if ! ask_yesno "更新 base 环境中的 conda / mamba 到最新稳定版？" y; then
+    log "已取消更新"
+    return 0
+  fi
+  if ! HOME="${ROOT_HOME}" "${CONDA_BIN}" update -n base conda -y; then
+    die_action "conda 更新失败"
+    return 1
+  fi
+  if [[ -x "${MAMBA_BIN}" ]]; then
+    HOME="${ROOT_HOME}" "${CONDA_BIN}" update -n base mamba -y || warn "mamba 更新未完成，不影响使用"
+  fi
+  log "更新后：$("${CONDA_BIN}" --version 2>/dev/null || true)"
+  return 0
+}
+
 env_create() {
   local ver="${1:-${PY_VER}}"
+  if ! conda_ok; then
+    die_action "未检测到 conda/Miniforge，请先安装或切换 Python 环境"
+    return 1
+  fi
   if env_ok; then
     log "Python 环境已存在（已满足）：$(env_python_version)"
     return 0
   fi
   local runner="${MAMBA_BIN}"
   [[ -x "${runner}" ]] || runner="${CONDA_BIN}"
-  log "创建 conda 环境 comfyui（Python ${ver}）"
-  if ! HOME="${ROOT_HOME}" "${runner}" create -n comfyui "python=${ver}" -y; then
-    die_action "创建 comfyui 环境失败（检查 condarc 镜像与网络）"
+  log "创建 conda 环境 ${CONDA_ENV_NAME}（Python ${ver}）"
+  if ! HOME="${ROOT_HOME}" "${runner}" create -n "${CONDA_ENV_NAME}" "python=${ver}" -y; then
+    die_action "创建 ${CONDA_ENV_NAME} 环境失败（检查 condarc 镜像与网络）"
     return 1
   fi
+  ENV_DIR="${MINIFORGE_DIR}/envs/${CONDA_ENV_NAME}"
+  ENV_PY="${ENV_DIR}/bin/python"
+  sync_env_bin
   if ! env_ok; then
     die_action "环境创建后 ${ENV_PY} 不可用"
     return 1
@@ -727,14 +1111,18 @@ env_create() {
 
 env_recreate() {
   local ver
-  warn "重建会删除现有 comfyui 环境（模型与 ComfyUI 代码不受影响）"
-  if ! ask_yesno "确认重建 comfyui 环境？" n; then
+  if ! conda_ok; then
+    die_action "未检测到 conda/Miniforge，无法重建 conda 环境"
+    return 1
+  fi
+  warn "重建会删除 conda 环境 ${CONDA_ENV_NAME}（模型与 ComfyUI 代码不受影响）"
+  if ! ask_yesno "确认重建 ${CONDA_ENV_NAME} 环境？" n; then
     log "已取消重建"
     return 0
   fi
   ver="$(ask_input_def "Python 版本" v_pyver "${PY_VER}")" || return 1
   if env_ok; then
-    if ! HOME="${ROOT_HOME}" "${CONDA_BIN}" env remove -n comfyui -y; then
+    if ! HOME="${ROOT_HOME}" "${CONDA_BIN}" env remove -n "${CONDA_ENV_NAME}" -y; then
       die_action "删除环境失败"
       return 1
     fi
@@ -743,24 +1131,98 @@ env_recreate() {
   return 0
 }
 
-# ============ ComfyUI / PyTorch ============
-pip_config_write() {
-  local f="${ROOT_HOME}/.config/pip/pip.conf" cur
-  if ! env_ok; then
-    die_action "Python 环境未就绪，先完成菜单 4"
+select_python_target() {
+  local cand_list=() line idx=1 choice custom
+  if conda_ok && [[ -f "${ROOT_HOME}/.conda/environments.txt" ]]; then
+    while IFS= read -r line; do
+      [[ -n "${line}" && -x "${line}/bin/python" ]] && cand_list+=("${line}/bin/python")
+    done < "${ROOT_HOME}/.conda/environments.txt"
+  fi
+  for line in "${COMFY_DIR}/venv/bin/python" "${COMFY_DIR}/.venv/bin/python" "$(command -v python3 2>/dev/null || true)"; do
+    [[ -n "${line}" && -x "${line}" ]] || continue
+    cand_list+=("${line}")
+  done
+  printf '当前 Python：%s (%s)\n' "${ENV_PY}" "$(env_python_version)"
+  if (( ${#cand_list[@]} > 0 )); then
+    printf '\n已探测到的候选 Python：\n'
+    for line in "${cand_list[@]}"; do
+      printf '  %d) %s (%s)\n' "${idx}" "${line}" "$("${line}" --version 2>&1 || true)"
+      idx=$((idx+1))
+    done
+  fi
+  printf '  可直接输入候选编号，或输入任意 python 可执行文件完整路径\n'
+  custom="$(ask_input "选择编号或输入 Python 路径" v_nonempty)" || return 1
+  if [[ "${custom}" =~ ^[0-9]+$ ]] && (( custom >= 1 && custom <= ${#cand_list[@]} )); then
+    custom="${cand_list[$((custom-1))]}"
+  fi
+  if ! v_pybin "${custom}"; then
+    die_action "Python 路径无效：${custom}"
     return 1
   fi
-  cur="$(env_py -m pip config get global.index-url 2>/dev/null || true)"
+  ENV_PY="${custom}"
+  sync_env_bin
+  if [[ "${ENV_PY}" == */envs/*/bin/python ]]; then
+    local env_base="${ENV_PY%/bin/python}"
+    CONDA_ENV_NAME="$(basename "${env_base}")"
+  fi
+  CUSTOM_TARGET_SET=1
+  log "本次会话已切换 Python：${ENV_PY}（$(env_python_version)）"
+  return 0
+}
+
+select_comfy_target() {
+  local cand_list=() d idx=1 custom
+  for d in "${ROOT_HOME}/ComfyUI" "${ROOT_HOME}/autodl-tmp/ComfyUI" "/workspace/ComfyUI" "/data/ComfyUI" "/opt/ComfyUI"; do
+    [[ -f "${d}/main.py" ]] && cand_list+=("${d}")
+  done
+  printf '当前 ComfyUI 目录：%s（%s）\n' "${COMFY_DIR}" "$(comfy_summary)"
+  if (( ${#cand_list[@]} > 0 )); then
+    printf '\n已探测到的 ComfyUI 目录：\n'
+    for d in "${cand_list[@]}"; do
+      printf '  %d) %s\n' "${idx}" "${d}"
+      idx=$((idx+1))
+    done
+  fi
+  printf '  可输入候选编号，或输入任意包含 main.py 的 ComfyUI 目录路径\n'
+  custom="$(ask_input "选择编号或输入 ComfyUI 目录" v_nonempty)" || return 1
+  if [[ "${custom}" =~ ^[0-9]+$ ]] && (( custom >= 1 && custom <= ${#cand_list[@]} )); then
+    custom="${cand_list[$((custom-1))]}"
+  fi
+  if ! v_comfy_dir "${custom}"; then
+    die_action "目录无效（缺少 main.py）：${custom}"
+    return 1
+  fi
+  COMFY_DIR="${custom%/}"
+  CUSTOM_TARGET_SET=1
+  log "本次会话已切换 ComfyUI 目录：${COMFY_DIR}（$(comfy_summary)）"
+  return 0
+}
+
+# ============ ComfyUI / PyTorch ============
+pip_config_write() {
+  local f="${ROOT_HOME}/.config/pip/pip.conf" cur=""
+  if env_ok; then
+    cur="$(env_py -m pip config get global.index-url 2>/dev/null || true)"
+  elif [[ -f "${f}" ]]; then
+    cur="$(awk -F= '/^[[:space:]]*index-url[[:space:]]*=/{gsub(/[[:space:]]/,"",$2); print $2; exit}' "${f}" 2>/dev/null || true)"
+  fi
   if [[ "${cur}" == "${PIP_MIRROR}" ]]; then
     log "pip 已指向阿里云镜像（已满足）"
     return 0
   fi
-  if [[ -e "${f}" ]]; then backup_file "${f}" >/dev/null || true; fi
-  if ! env_py -m pip config set global.index-url "${PIP_MIRROR}"; then
-    die_action "写入 pip 镜像配置失败"
-    return 1
+  if [[ -e "${f}" ]]; then
+    backup_file "${f}" >/dev/null || true
+    if ! ask_yesno "覆盖现有 pip 配置 ${f}（将备份）？" y; then
+      warn "保留现有 pip 配置"
+      return 0
+    fi
   fi
-  log "pip 全局源已设为 ${PIP_MIRROR}"
+  mkdir -p "$(dirname "${f}")" || { die_action "创建 pip 配置目录失败"; return 1; }
+  cat > "${f}" <<EOF
+[global]
+index-url = ${PIP_MIRROR}
+EOF
+  log "pip 全局源已设为 ${PIP_MIRROR}（写入 ${f}）"
   return 0
 }
 
@@ -778,15 +1240,16 @@ pip_install_fallback() {
 }
 
 comfy_clone_or_pull() {
-  if ! command -v git >/dev/null 2>&1; then
-    die_action "git 未安装，先完成菜单 2 的基础包安装"
-    return 1
-  fi
+  ensure_cmd git git || return 1
   if [[ -d "${COMFY_DIR}" && ! -d "${COMFY_DIR}/.git" ]]; then
-    die_action "${COMFY_DIR} 存在但不是 git 仓库，拒绝覆盖"
+    if comfy_present; then
+      warn "${COMFY_DIR} 已存在（非 git 目录，跳过 git pull 并保留现有代码）"
+      return 0
+    fi
+    die_action "${COMFY_DIR} 存在且既无 .git 也无 main.py，拒绝覆盖"
     return 1
   fi
-  if comfy_ok; then
+  if comfy_git_ok; then
     local before after
     before="$(git -C "${COMFY_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
     if ! git -C "${COMFY_DIR}" pull --ff-only; then
@@ -825,21 +1288,30 @@ parse_torch_report() {
 }
 
 torch_install() {
-  local ver cuda avail out
+  local allow_upgrade="${1:-0}" ver cuda avail out preinstall_no_driver=0 mode_choice
   if ! env_ok; then
-    die_action "Python 环境未就绪，先完成菜单 4"
+    die_action "Python 环境未就绪，请先在菜单 4 创建或切换已有 Python 环境"
     return 1
   fi
   if (( CPU_MODE == 0 )) && ! gpu_driver_ready; then
     if gpu_hardware_present; then
-      die_action "GPU 驱动未就绪，请先完成菜单 3"
-      return 1
-    fi
-    if ask_yesno "未检测到可用 GPU，安装 CPU 版 PyTorch？" n; then
-      CPU_MODE=1
+      warn "检测到 NVIDIA GPU，但当前驱动未就绪（nvidia-smi 不可用）"
+      printf '  1) 预装 CUDA 13 版 PyTorch（装完驱动重启后再验证可用性）\n'
+      printf '  2) 安装 CPU 版 PyTorch（仅测试）\n'
+      printf '  3) 取消（先去菜单 3 安装驱动）\n'
+      mode_choice="$(ask_input_def "选择处理方式" v_choice_three "3")" || return 1
+      case "${mode_choice}" in
+        1) preinstall_no_driver=1 ;;
+        2) CPU_MODE=1 ;;
+        3) die_action "已取消，请先完成菜单 3 的驱动安装"; return 1 ;;
+      esac
     else
-      die_action "已取消"
-      return 1
+      if ask_yesno "未检测到可用 GPU，安装 CPU 版 PyTorch？" n; then
+        CPU_MODE=1
+      else
+        die_action "已取消"
+        return 1
+      fi
     fi
   fi
   out="$(torch_report || true)"
@@ -847,15 +1319,46 @@ torch_install() {
     parse_torch_report "${out}"
     if (( CPU_MODE )); then
       if [[ "${ver}" == *"+cpu"* || -z "${cuda}" ]]; then
+        if (( allow_upgrade )) && ask_yesno "当前已装 CPU 版 PyTorch ${ver}，是否升级到最新稳定版？" n; then
+          if ! env_py -m pip install -U torch torchvision --index-url "${CPU_INDEX}"; then
+            warn "官方 CPU 索引升级失败"
+            if ask_yesno "改用南京大学 CPU 镜像重试？" y; then
+              env_py -m pip install -U torch torchvision --index-url "${CPU_INDEX_FALLBACK}" || {
+                die_action "PyTorch 升级失败"; return 1;
+              }
+            else
+              die_action "PyTorch 升级失败"; return 1
+            fi
+          fi
+          out="$(torch_report || true)"
+          [[ -n "${out}" ]] && parse_torch_report "${out}"
+          log "当前 PyTorch ${ver}（CPU）"
+          return 0
+        fi
         log "已安装 CPU 版 PyTorch ${ver}（已满足）"
         return 0
       fi
-    elif [[ "$(cuda_major "${cuda}")" == "13" && "${avail}" == "True" ]]; then
+    elif [[ "$(cuda_major "${cuda}")" == "13" ]] && { (( preinstall_no_driver )) || [[ "${avail}" == "True" ]]; }; then
+      if (( allow_upgrade )) && ask_yesno "当前已装 CUDA 13 PyTorch ${ver}，是否升级到最新稳定版（pip install -U）？" n; then
+        if ! pip_install_fallback "PyTorch 升级" -U torch torchvision; then
+          die_action "PyTorch 升级失败（检查 pip 镜像与网络）"
+          return 1
+        fi
+        out="$(torch_report || true)"
+        [[ -n "${out}" ]] || { die_action "PyTorch 升级后 import 失败"; return 1; }
+        parse_torch_report "${out}"
+        if (( preinstall_no_driver == 0 )) && [[ "$(cuda_major "${cuda}")" != "13" || "${avail}" != "True" ]]; then
+          die_action "PyTorch ${ver} / CUDA ${cuda:-无} / cuda.is_available=${avail}，与驱动不匹配"
+          return 1
+        fi
+        log "PyTorch 已升级为 ${ver}（CUDA ${cuda}）"
+        return 0
+      fi
       log "已安装 CUDA 13 PyTorch ${ver}（已满足）"
       return 0
     fi
-    warn "现有 PyTorch 与目标模式不匹配：${ver} / CUDA ${cuda:-无}"
-    if ! ask_yesno "重新安装 PyTorch？" y; then
+    warn "现有 PyTorch 与目标模式不匹配：${ver} / CUDA ${cuda:-无} / avail=${avail:-未知}"
+    if ! ask_yesno "卸载旧版并重新安装 PyTorch？" y; then
       return 0
     fi
     log "卸载旧 torch / torchvision 后重装"
@@ -895,6 +1398,14 @@ torch_install() {
     log "PyTorch ${ver}（CPU）可用"
     return 0
   fi
+  if (( preinstall_no_driver )); then
+    if [[ "$(cuda_major "${cuda}")" != "13" ]]; then
+      die_action "预装的 PyTorch ${ver} / CUDA ${cuda:-无} 不是 CUDA 13 版本"
+      return 1
+    fi
+    warn "已预装 PyTorch ${ver}（CUDA ${cuda}）；待安装驱动并重启后运行菜单 9 验证 cuda.is_available"
+    return 0
+  fi
   if [[ "$(cuda_major "${cuda}")" != "13" || "${avail}" != "True" ]]; then
     die_action "PyTorch ${ver} / CUDA ${cuda:-无} / cuda.is_available=${avail}，与驱动不匹配"
     return 1
@@ -904,26 +1415,31 @@ torch_install() {
 }
 
 requirements_install() {
-  local f
-  if ! comfy_ok; then
-    die_action "ComfyUI 未安装，先完成菜单 5 的 clone"
+  if ! env_ok; then
+    die_action "Python 环境未就绪，请先在菜单 4 创建或切换已有 Python 环境"
     return 1
   fi
-  for f in "${COMFY_DIR}/requirements.txt" "${COMFY_DIR}/manager_requirements.txt"; do
-    if [[ ! -f "${f}" ]]; then
-      die_action "缺少依赖清单：${f}"
-      return 1
-    fi
-  done
+  if ! comfy_present; then
+    die_action "未在 ${COMFY_DIR} 检测到 ComfyUI（缺少 main.py），请先克隆或切换目录"
+    return 1
+  fi
+  if [[ ! -f "${COMFY_DIR}/requirements.txt" ]]; then
+    die_action "缺少依赖清单：${COMFY_DIR}/requirements.txt"
+    return 1
+  fi
   log "安装 ComfyUI requirements"
   if ! pip_install_fallback "ComfyUI requirements" -r "${COMFY_DIR}/requirements.txt"; then
     die_action "ComfyUI requirements 安装失败"
     return 1
   fi
-  log "安装 Manager requirements"
-  if ! pip_install_fallback "Manager requirements" -r "${COMFY_DIR}/manager_requirements.txt"; then
-    die_action "Manager requirements 安装失败"
-    return 1
+  if [[ -f "${COMFY_DIR}/manager_requirements.txt" ]]; then
+    log "安装 Manager requirements"
+    if ! pip_install_fallback "Manager requirements" -r "${COMFY_DIR}/manager_requirements.txt"; then
+      die_action "Manager requirements 安装失败"
+      return 1
+    fi
+  else
+    log "未找到 manager_requirements.txt，跳过内置 Manager 依赖"
   fi
   return 0
 }
@@ -931,7 +1447,7 @@ requirements_install() {
 smoke_test() {
   local -a args=(main.py --quick-test-for-ci --enable-manager)
   if (( CPU_MODE )); then args+=(--cpu); fi
-  if ! comfy_ok || ! env_ok; then
+  if ! comfy_present || ! env_ok; then
     die_action "ComfyUI 或 Python 环境未就绪"
     return 1
   fi
@@ -975,13 +1491,43 @@ ensure_fw_8188() {
 }
 
 # ============ 开机自启 ============
+extract_existing_extra_args() {
+  local f line tok skip_next=0
+  local -a words=()
+  COMFY_EXTRA_ARGS=()
+  f="$(config_file)"
+  [[ -n "${f}" ]] || return 0
+  if [[ "${f}" == "${UNIT_FILE}" ]]; then
+    line="$(awk -F= '/^ExecStart=/{sub(/^[[:space:]]+/, "", $2); print $2; exit}' "${f}" 2>/dev/null || true)"
+  else
+    line="$(awk '/^exec /{sub(/^exec /, ""); print; exit}' "${f}" 2>/dev/null || true)"
+  fi
+  [[ -n "${line}" ]] || return 0
+  read -r -a words <<< "${line}"
+  local i=0
+  for tok in "${words[@]}"; do
+    if (( i == 0 )); then i=1; continue; fi
+    if (( skip_next )); then skip_next=0; continue; fi
+    case "${tok}" in
+      main.py|*/main.py|--enable-manager|--cpu) continue ;;
+      --listen|--port) skip_next=1; continue ;;
+      --listen=*|--port=*) continue ;;
+      *) COMFY_EXTRA_ARGS+=("${tok}") ;;
+    esac
+  done
+}
+
 build_comfy_args() {
-  COMFY_ARGS=(--enable-manager)
+  extract_existing_extra_args
+  COMFY_ARGS=(main.py --enable-manager)
   if [[ "${ACCESS_MODE}" == "listen" ]]; then
     COMFY_ARGS+=(--listen 0.0.0.0 --port "${PORT}")
   fi
   if (( CPU_MODE )); then
     COMFY_ARGS+=(--cpu)
+  fi
+  if (( ${#COMFY_EXTRA_ARGS[@]} > 0 )); then
+    COMFY_ARGS+=("${COMFY_EXTRA_ARGS[@]}")
   fi
 }
 
@@ -995,9 +1541,6 @@ sync_runtime_mode() {
 }
 
 ensure_comfy_args() {
-  if (( ${#COMFY_ARGS[@]} > 0 )); then
-    return 0
-  fi
   if [[ -z "${ACCESS_MODE}" ]]; then
     ACCESS_MODE="$(current_access_mode)"
   fi
@@ -1010,8 +1553,8 @@ write_systemd_unit() {
     die_action "当前 PID 1 不是 systemd，不能写 systemd 服务"
     return 1
   fi
-  if ! env_ok || ! comfy_ok; then
-    die_action "Python 环境或 ComfyUI 未就绪，不能写自启配置"
+  if ! env_ok || ! comfy_present; then
+    die_action "Python 环境或 ComfyUI（main.py）未就绪，不能写自启配置"
     return 1
   fi
   ensure_comfy_args
@@ -1054,8 +1597,8 @@ write_startd_script() {
     die_action "未检测到 ${STARTD_DIR}，不能写容器自启脚本"
     return 1
   fi
-  if ! env_ok || ! comfy_ok; then
-    die_action "Python 环境或 ComfyUI 未就绪，不能写自启配置"
+  if ! env_ok || ! comfy_present; then
+    die_action "Python 环境或 ComfyUI（main.py）未就绪，不能写自启配置"
     return 1
   fi
   ensure_comfy_args
@@ -1220,14 +1763,14 @@ verify_all() {
     fi
   fi
 
-  if miniforge_ok; then check_ok "Miniforge：$("${CONDA_BIN}" --version 2>/dev/null || true)"
-  else check_fail "Miniforge 未安装"; fi
+  if miniforge_ok; then check_ok "Conda：$("${CONDA_BIN}" --version 2>/dev/null || true)"
+  else check_fail "Miniforge/conda 未安装"; fi
 
-  if env_ok; then check_ok "Python 环境：$(env_python_version)"
-  else check_fail "comfyui 环境未创建"; fi
+  if env_ok; then check_ok "Python 环境：$(env_python_version) (${ENV_PY})"
+  else check_fail "Python 环境未就绪 (${ENV_PY})"; fi
 
-  if comfy_ok; then check_ok "ComfyUI：$(comfy_commit)"
-  else check_fail "ComfyUI 未克隆"; fi
+  if comfy_present; then check_ok "ComfyUI：$(comfy_summary)"
+  else check_fail "ComfyUI 未安装 (${COMFY_DIR})"; fi
 
   if env_ok; then
     local mgr_ver
@@ -1341,7 +1884,22 @@ do_standard_deploy() {
   step_banner 1 "预检：发行版、快照、磁盘、镜像"
   preflight_deploy || { warn "标准部署已中止"; return 1; }
 
-  step_banner 2 "基础工具与底层库"
+  step_banner 2 "系统换源与基础工具"
+  if ask_yesno "安装必要基础组件前，是否先更换系统 apt 软件源（LinuxMirrors，国内服务器推荐）？" n; then
+    mirror_change_action || rc=$?
+    if (( rc == 1 )); then
+      if ! ask_yesno "换源脚本未成功完成，是否仍继续安装基础包？" n; then
+        warn "标准部署已中止"
+        return 1
+      fi
+    elif (( rc == 2 )); then
+      if ! ask_yesno "未自动执行换源，是否继续安装基础包？" y; then
+        warn "标准部署已中止"
+        return 1
+      fi
+    fi
+    rc=0
+  fi
   install_base_packages || { warn "标准部署已中止"; return 1; }
 
   step_banner 3 "GPU 与驱动"
@@ -1369,7 +1927,7 @@ do_standard_deploy() {
 
   step_banner 7 "pip 镜像、PyTorch 与依赖"
   pip_config_write || { warn "标准部署已中止"; return 1; }
-  torch_install || { warn "标准部署已中止"; return 1; }
+  torch_install 0 || { warn "标准部署已中止"; return 1; }
   requirements_install || { warn "标准部署已中止"; return 1; }
 
   step_banner 8 "冒烟测试"
@@ -1408,6 +1966,7 @@ status_menu() {
   printf '系统：%s\n' "$(distro_pretty)"
   printf '\n[GPU]\n'
   if command -v nvidia-smi >/dev/null 2>&1; then
+    printf '驱动包：%s\n' "$(driver_flavor_label)"
     nvidia-smi 2>&1 || true
   else
     printf 'nvidia-smi 未安装\n'
@@ -1418,13 +1977,16 @@ status_menu() {
   df -h "${ROOT_HOME}" 2>&1 || true
   free -h 2>&1 || true
   printf '\n[Miniforge / Python]\n'
-  if miniforge_ok; then "${CONDA_BIN}" --version 2>&1 || true; else printf 'Miniforge 未安装\n'; fi
-  printf '环境：%s\n' "$(env_python_version)"
+  if miniforge_ok; then "${CONDA_BIN}" --version 2>&1 || true; else printf 'Miniforge/conda 未安装\n'; fi
+  printf '当前 Python：%s (%s)\n' "${ENV_PY}" "$(env_python_version)"
   if miniforge_ok; then HOME="${ROOT_HOME}" "${CONDA_BIN}" env list 2>&1 || true; fi
   printf '\n[ComfyUI]\n'
-  if comfy_ok; then
+  printf '目标目录：%s\n' "${COMFY_DIR}"
+  if comfy_git_ok; then
     git -C "${COMFY_DIR}" log -1 --oneline 2>&1 || true
     printf '分支：%s\n' "$(git -C "${COMFY_DIR}" branch --show-current 2>/dev/null || true)"
+  elif comfy_present; then
+    printf '已存在（非 Git 目录，包含 main.py）\n'
   else
     printf '未安装\n'
   fi
@@ -1451,6 +2013,45 @@ status_menu() {
 }
 
 # ============ 菜单：基础包与镜像 ============
+mirror_instructions() {
+  printf '  第三方来源：SuperManito 的 LinuxMirrors（%s）\n' "${LINUXMIRRORS_URL}"
+  printf '  免责声明：本项目不提供或维护该脚本，也未对当前在线版本完成全量安全审计。\n'
+  printf '  只有在你自行审阅并接受以 root 执行第三方代码的风险后才运行。\n'
+  printf '  运行前确认已在云平台创建 Snapshot；对应命令：\n'
+  printf '    bash <(curl -fsSL %s)\n' "${LINUXMIRRORS_URL}"
+  printf '  若随后继续本部署流程，请在第三方脚本中选择跳过软件包升级；本流程稍后会按需装包。\n'
+}
+
+mirror_execute_linuxmirrors() {
+  local tmp="${TMPD}/linuxmirrors.sh" rc=0
+  ensure_cmd curl curl || return 1
+  log "拉取 ${LINUXMIRRORS_URL}"
+  if ! curl -fsSL -o "${tmp}" "${LINUXMIRRORS_URL}" || [[ ! -s "${tmp}" ]]; then
+    rm -f -- "${tmp}"
+    die_action "下载换源脚本失败（检查网络或手动执行上方命令）"
+    return 1
+  fi
+  bash "${tmp}" || rc=$?
+  rm -f -- "${tmp}"
+  if (( rc != 0 )); then
+    die_action "换源脚本退出异常（exit ${rc}）"
+    return 1
+  fi
+  log "系统换源脚本执行完成"
+  return 0
+}
+
+# 返回：0 已执行成功；1 执行失败；2 用户未执行（仅展示说明）
+mirror_change_action() {
+  mirror_instructions
+  if ask_yesno "已阅读以上免责声明并自愿承担风险，是否立即执行换源命令？" n; then
+    mirror_execute_linuxmirrors || return 1
+    return 0
+  fi
+  log "未自动执行；如需手动运行可复制上方命令"
+  return 2
+}
+
 base_menu() {
   local reply
   while :; do
@@ -1464,9 +2065,10 @@ base_menu() {
     ui_item 2 "配置 conda 清华镜像"
     ui_item 3 "配置 pip 阿里镜像"
     ui_item 4 "测试镜像连通性"
+    ui_item 5 "系统软件源换源（LinuxMirrors 第三方脚本）"
     ui_quit
     ui_sep
-    ask_menu "选择" 4
+    ask_menu "选择" 5
     reply="${UI_REPLY}"
     case "${reply}" in
       0) return 0 ;;
@@ -1474,6 +2076,7 @@ base_menu() {
       2) act condarc_write || true; scr_pause ;;
       3) act pip_config_write || true; scr_pause ;;
       4) act mirror_check_all || true; scr_pause ;;
+      5) act mirror_change_action || true; scr_pause ;;
     esac
   done
 }
@@ -1498,14 +2101,15 @@ gpu_menu() {
     if gpu_hardware_present; then
       ui_kv "GPU" "$(gpu_name)"
       ui_kv "驱动" "$(gpu_driver_version)"
+      ui_kv "驱动包" "$(driver_flavor_label)"
       ui_kv "CUDA" "$(gpu_cuda_version)"
     else
       ui_kv "GPU" "$(ui_no '未检测到')"
     fi
     ui_sep
     ui_item 1 "查看 nvidia-smi / nvcc"
-    ui_item 2 "安装或升级驱动"
-    ui_item 3 "安装 cuda-toolkit（可选）"
+    ui_item 2 "安装 / 升级驱动（可选稳定分支或最新稳定版）"
+    ui_item 3 "安装 / 升级 cuda-toolkit（可选）"
     ui_item 4 "重启服务器"
     ui_quit
     ui_sep
@@ -1536,8 +2140,9 @@ env_menu() {
     ui_rule
     printf '%s Miniforge 与 Python 环境%s\n' "${C_B}" "${C_0}"
     ui_sep
-    ui_kv "Miniforge" "$(miniforge_ok && printf '已安装' || printf '未安装')"
+    ui_kv "Conda" "$(miniforge_ok && printf '已安装 (%s)' "${CONDA_BIN}" || printf '未安装')"
     ui_kv "Python" "$(env_python_version)"
+    ui_kv "解释器" "${ENV_PY}"
     ui_kv "conda 镜像" "$(grep -qF "${CONDA_MIRROR}" "${ROOT_HOME}/.condarc" 2>/dev/null && printf '清华' || printf '未配置')"
     ui_sep
     ui_item 1 "安装 / 修复 Miniforge"
@@ -1545,18 +2150,30 @@ env_menu() {
     ui_item 3 "创建 Python 环境（3.13 默认）"
     ui_item 4 "重建 Python 环境"
     ui_item 5 "查看 conda 环境"
+    ui_item 6 "更新 conda / mamba"
+    ui_item 7 "切换当前 Python 环境（仅本次会话）"
     ui_quit
     ui_sep
-    ask_menu "选择" 5
+    ask_menu "选择" 7
     reply="${UI_REPLY}"
     case "${reply}" in
       0) return 0 ;;
       1) act miniforge_install || true; scr_pause ;;
       2) act condarc_write || true; scr_pause ;;
-      3) ver="$(ask_input_def "Python 版本" v_pyver "${PY_VER}")" || { warn "输入中断"; return 1; }
-         act env_create "${ver}" || true; scr_pause ;;
+      3) if env_ok; then
+           warn "Python 环境已存在：$(env_python_version)（${ENV_PY}）"
+           if ask_yesno "是否通过重建替换为其他 Python 版本？" n; then
+             act env_recreate || true
+           fi
+         else
+           ver="$(ask_input_def "Python 版本" v_pyver "${PY_VER}")" || { warn "输入中断"; return 1; }
+           act env_create "${ver}" || true
+         fi
+         scr_pause ;;
       4) act env_recreate || true; scr_pause ;;
       5) act env_show || true ;;
+      6) act conda_update_action || true; scr_pause ;;
+      7) act select_python_target || true; scr_pause ;;
     esac
   done
 }
@@ -1565,7 +2182,7 @@ env_show() {
   if miniforge_ok; then
     "${CONDA_BIN}" env list 2>&1 || true
   else
-    printf 'Miniforge 未安装\n'
+    printf 'Miniforge/conda 未安装\n'
   fi
   page_wait "按回车返回…"
 }
@@ -1578,36 +2195,41 @@ comfy_menu() {
     ui_rule
     printf '%s ComfyUI 与 PyTorch%s\n' "${C_B}" "${C_0}"
     ui_sep
-    ui_kv "ComfyUI" "$(comfy_commit)"
+    ui_kv "目录" "${COMFY_DIR}"
+    ui_kv "ComfyUI" "$(comfy_summary)"
+    ui_kv "Python" "$(env_python_version)"
     ui_kv "torch" "$(pip_version torch)"
     ui_kv "torchvision" "$(pip_version torchvision)"
     ui_kv "Manager" "$(pip_version comfyui_manager)"
     ui_sep
     ui_item 1 "克隆 / 更新 ComfyUI"
     ui_item 2 "配置 pip 阿里镜像"
-    ui_item 3 "安装 / 修复 PyTorch"
+    ui_item 3 "安装 / 修复 / 升级 PyTorch"
     ui_item 4 "安装 / 修复 requirements"
     ui_item 5 "完整更新（代码 + 依赖 + 重启）"
     ui_item 6 "查看版本"
+    ui_item 7 "切换当前 ComfyUI 目录（仅本次会话）"
     ui_quit
     ui_sep
-    ask_menu "选择" 6
+    ask_menu "选择" 7
     reply="${UI_REPLY}"
     case "${reply}" in
       0) return 0 ;;
       1) act comfy_clone_or_pull || true; scr_pause ;;
       2) act pip_config_write || true; scr_pause ;;
-      3) act torch_install || true; scr_pause ;;
+      3) act torch_install 1 || true; scr_pause ;;
       4) act requirements_install || true; scr_pause ;;
       5) act comfy_update || true; scr_pause ;;
       6) act comfy_versions || true ;;
+      7) act select_comfy_target || true; scr_pause ;;
     esac
   done
 }
 
 comfy_versions() {
-  printf 'ComfyUI：%s\n' "$(comfy_commit)"
-  printf 'Python：%s\n' "$(env_python_version)"
+  printf '目录：%s\n' "${COMFY_DIR}"
+  printf 'ComfyUI：%s\n' "$(comfy_summary)"
+  printf 'Python：%s (%s)\n' "$(env_python_version)" "${ENV_PY}"
   printf 'torch：%s\n' "$(pip_version torch)"
   printf 'torchvision：%s\n' "$(pip_version torchvision)"
   printf 'comfyui_manager：%s\n' "$(pip_version comfyui_manager)"
@@ -1616,8 +2238,8 @@ comfy_versions() {
 
 comfy_update() {
   local before after
-  if ! comfy_ok || ! env_ok; then
-    die_action "ComfyUI 或环境未就绪"
+  if ! comfy_git_ok || ! env_ok; then
+    die_action "ComfyUI（需为 Git 仓库）或 Python 环境未就绪"
     return 1
   fi
   before="$(git -C "${COMFY_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
@@ -1638,6 +2260,10 @@ declare -a MODEL_DIRS=(checkpoints diffusion_models text_encoders vae loras cont
 
 model_dirs_show() {
   local d base
+  if [[ ! -d "${COMFY_DIR}" ]]; then
+    die_action "ComfyUI 目录不存在（${COMFY_DIR}），请先克隆或切换目录"
+    return 1
+  fi
   for d in "${MODEL_DIRS[@]}"; do
     base="${COMFY_DIR}/models/${d}"
     mkdir -p "${base}" || { die_action "创建 ${base} 失败"; return 1; }
@@ -1646,17 +2272,46 @@ model_dirs_show() {
   return 0
 }
 
+resolve_download_py() {
+  if env_ok; then
+    printf '%s' "${ENV_PY}"
+    return 0
+  fi
+  local syspy
+  syspy="$(command -v python3 2>/dev/null || true)"
+  if [[ -n "${syspy}" && -x "${syspy}" ]]; then
+    printf '%s' "${syspy}"
+    return 0
+  fi
+  return 1
+}
+
 download_modelscope() {
-  local repo="$1" file="$2" dir="$3"
-  if [[ ! -x "${ENV_BIN}/modelscope" ]]; then
-    log "安装 modelscope"
-    if ! env_py -m pip install -U modelscope; then
+  local repo="$1" file="$2" dir="$3" cli="" py=""
+  if [[ -x "${ENV_BIN}/modelscope" ]]; then
+    cli="${ENV_BIN}/modelscope"
+  elif command -v modelscope >/dev/null 2>&1; then
+    cli="$(command -v modelscope)"
+  else
+    py="$(resolve_download_py || true)"
+    if [[ -z "${py}" ]]; then
+      die_action "未找到可用的 Python/modelscope（请在菜单 4 准备环境或菜单 6 用 aria2c 直链）"
+      return 1
+    fi
+    log "安装 modelscope（使用 ${py}）"
+    if ! HOME="${ROOT_HOME}" "${py}" -m pip install -U modelscope; then
       die_action "modelscope 安装失败"
       return 1
     fi
+    cli="$(dirname "${py}")/modelscope"
+    [[ -x "${cli}" ]] || cli="$(command -v modelscope 2>/dev/null || true)"
+  fi
+  if [[ -z "${cli}" || ! -x "${cli}" ]]; then
+    die_action "modelscope 命令不可用"
+    return 1
   fi
   log "ModelScope 下载 ${repo}/${file}"
-  if ! HOME="${ROOT_HOME}" "${ENV_BIN}/modelscope" download --model "${repo}" "${file}" --local_dir "${dir}"; then
+  if ! HOME="${ROOT_HOME}" "${cli}" download --model "${repo}" "${file}" --local_dir "${dir}"; then
     die_action "ModelScope 下载失败"
     return 1
   fi
@@ -1665,16 +2320,34 @@ download_modelscope() {
 }
 
 download_hf() {
-  local repo="$1" file="$2" dir="$3" cli
-  if ! env_py -m pip show huggingface_hub >/dev/null 2>&1; then
-    log "安装 huggingface_hub[cli] 与 hf_transfer"
-    if ! env_py -m pip install -U "huggingface_hub[cli]" hf_transfer; then
+  local repo="$1" file="$2" dir="$3" cli="" py=""
+  if [[ -x "${ENV_BIN}/hf" ]]; then
+    cli="${ENV_BIN}/hf"
+  elif [[ -x "${ENV_BIN}/huggingface-cli" ]]; then
+    cli="${ENV_BIN}/huggingface-cli"
+  elif command -v hf >/dev/null 2>&1; then
+    cli="$(command -v hf)"
+  elif command -v huggingface-cli >/dev/null 2>&1; then
+    cli="$(command -v huggingface-cli)"
+  else
+    py="$(resolve_download_py || true)"
+    if [[ -z "${py}" ]]; then
+      die_action "未找到可用的 Python/huggingface_hub（请在菜单 4 准备环境或菜单 6 用 aria2c 直链）"
+      return 1
+    fi
+    log "安装 huggingface_hub[cli] 与 hf_transfer（使用 ${py}）"
+    if ! HOME="${ROOT_HOME}" "${py}" -m pip install -U "huggingface_hub[cli]" hf_transfer; then
       die_action "huggingface_hub 安装失败"
       return 1
     fi
+    cli="$(dirname "${py}")/hf"
+    [[ -x "${cli}" ]] || cli="$(dirname "${py}")/huggingface-cli"
+    [[ -x "${cli}" ]] || cli="$(command -v hf 2>/dev/null || command -v huggingface-cli 2>/dev/null || true)"
   fi
-  cli="${ENV_BIN}/hf"
-  [[ -x "${cli}" ]] || cli="${ENV_BIN}/huggingface-cli"
+  if [[ -z "${cli}" || ! -x "${cli}" ]]; then
+    die_action "hf / huggingface-cli 命令不可用"
+    return 1
+  fi
   log "hf-mirror 下载 ${repo}/${file}"
   if ! HF_ENDPOINT="https://hf-mirror.com" HF_HUB_ENABLE_HF_TRANSFER=1 \
        HOME="${ROOT_HOME}" "${cli}" download "${repo}" "${file}" --local-dir "${dir}"; then
@@ -1687,10 +2360,7 @@ download_hf() {
 
 download_aria2() {
   local url="$1" dir="$2" file="$3"
-  if ! command -v aria2c >/dev/null 2>&1; then
-    die_action "aria2c 未安装（基础包包含 aria2）"
-    return 1
-  fi
+  ensure_cmd aria2c aria2 || return 1
   log "aria2c 下载 ${file}"
   if ! aria2c -x 16 -s 16 -c -d "${dir}" -o "${file}" "${url}"; then
     die_action "aria2c 下载失败"
@@ -1716,12 +2386,26 @@ copy_extra_model_paths() {
   return 0
 }
 
+model_default_dir() {
+  if [[ -d "${COMFY_DIR}/models/checkpoints" ]]; then
+    printf '%s' "${COMFY_DIR}/models/checkpoints"
+  elif [[ -d "${COMFY_DIR}" ]]; then
+    printf '%s' "${COMFY_DIR}"
+  else
+    printf '%s' "${ROOT_HOME}"
+  fi
+}
+
 model_menu() {
-  local reply repo file dir url
+  local reply repo file dir url def_dir
   while :; do
+    def_dir="$(model_default_dir)"
     scr_clear
     ui_rule
     printf '%s 模型目录与下载%s\n' "${C_B}" "${C_0}"
+    ui_sep
+    ui_kv "ComfyUI" "${COMFY_DIR}"
+    ui_kv "默认保存" "${def_dir}"
     ui_sep
     ui_item 1 "创建 / 查看模型目录"
     ui_item 2 "下载 SDXL Base（ModelScope）"
@@ -1736,21 +2420,23 @@ model_menu() {
     case "${reply}" in
       0) return 0 ;;
       1) act model_dirs_show || true; scr_pause ;;
-      2) if ask_yesno "下载 SDXL Base（约 6.9GB）？" n; then
-           act download_modelscope "AI-ModelScope/stable-diffusion-xl-base-1.0" "sd_xl_base_1.0.safetensors" "${COMFY_DIR}/models/checkpoints" || true
+      2) if ask_yesno "下载 SDXL Base（约 6.9GB）到 ${def_dir}？" n; then
+           mkdir -p "${def_dir}"
+           act download_modelscope "AI-ModelScope/stable-diffusion-xl-base-1.0" "sd_xl_base_1.0.safetensors" "${def_dir}" || true
          fi
          scr_pause ;;
-      3) if ask_yesno "下载 SDXL Base（约 6.9GB）？" n; then
-           act download_hf "stabilityai/stable-diffusion-xl-base-1.0" "sd_xl_base_1.0.safetensors" "${COMFY_DIR}/models/checkpoints" || true
+      3) if ask_yesno "下载 SDXL Base（约 6.9GB）到 ${def_dir}？" n; then
+           mkdir -p "${def_dir}"
+           act download_hf "stabilityai/stable-diffusion-xl-base-1.0" "sd_xl_base_1.0.safetensors" "${def_dir}" || true
          fi
          scr_pause ;;
       4) url="$(ask_input "下载直链" v_nonempty)" || { warn "输入中断"; return 1; }
          file="$(ask_input "文件名" v_nonempty)" || { warn "输入中断"; return 1; }
-         dir="$(ask_input_def "目标目录" v_dir "${COMFY_DIR}/models/checkpoints")" || { warn "输入中断"; return 1; }
+         dir="$(ask_input_def "目标目录" v_dir "${def_dir}")" || { warn "输入中断"; return 1; }
          act download_aria2 "${url}" "${dir}" "${file}" || true; scr_pause ;;
       5) repo="$(ask_input "ModelScope 仓库（owner/name）" v_nonempty)" || { warn "输入中断"; return 1; }
          file="$(ask_input "文件名" v_nonempty)" || { warn "输入中断"; return 1; }
-         dir="$(ask_input_def "目标目录" v_dir "${COMFY_DIR}/models/checkpoints")" || { warn "输入中断"; return 1; }
+         dir="$(ask_input_def "目标目录" v_dir "${def_dir}")" || { warn "输入中断"; return 1; }
          act download_modelscope "${repo}" "${file}" "${dir}" || true; scr_pause ;;
       6) act copy_extra_model_paths || true; scr_pause ;;
     esac
@@ -1774,17 +2460,19 @@ access_menu() {
     ui_item 1 "查看访问地址与隧道命令"
     ui_item 2 "设置为监听 0.0.0.0:${PORT}（公网直连）"
     ui_item 3 "设置为仅回环 + SSH 隧道"
-    ui_item 4 "重启服务使配置生效"
+    ui_item 4 "仅检查 / 放行 UFW ${PORT} 端口（不改服务）"
+    ui_item 5 "重启服务使配置生效"
     ui_quit
     ui_sep
-    ask_menu "选择" 4
+    ask_menu "选择" 5
     reply="${UI_REPLY}"
     case "${reply}" in
       0) return 0 ;;
       1) act access_info_page || true; scr_pause ;;
       2) ACCESS_MODE="listen"; act apply_access_mode || true; scr_pause ;;
       3) ACCESS_MODE="tunnel"; act apply_access_mode || true; scr_pause ;;
-      4) act service_restart || true; scr_pause ;;
+      4) act ensure_fw_8188 || true; scr_pause ;;
+      5) act service_restart || true; scr_pause ;;
     esac
   done
 }
@@ -1801,7 +2489,17 @@ apply_access_mode() {
     ensure_fw_8188 || warn "UFW 放行失败"
   fi
   sync_runtime_mode
-  autostart_write || return 1
+  if unit_exists || startd_configured; then
+    autostart_write || return 1
+  elif env_ok && comfy_present; then
+    if ask_yesno "尚未配置开机自启，现在按 ${ACCESS_MODE} 模式写入自启配置？" y; then
+      autostart_write || return 1
+    else
+      warn "未写入自启服务；如手动启动，请按需加减 --listen 0.0.0.0 --port ${PORT}"
+    fi
+  else
+    warn "未检测到可用的 ComfyUI 或 Python 环境，仅处理防火墙策略（未写自启服务）"
+  fi
   show_access_info
   return 0
 }
@@ -1850,6 +2548,8 @@ autostart_menu() {
     ui_kv "服务" "$(service_summary)"
     ui_kv "自启" "$(autostart_summary)"
     ui_kv "CPU 参数" "$(config_has_cpu && printf '--cpu' || printf 'GPU')"
+    ui_kv "ComfyUI" "${COMFY_DIR}"
+    ui_kv "Python" "${ENV_PY}"
     ui_sep
     ui_item 1 "写入 / 更新自启配置（当前访问方式）"
     ui_item 2 "写入 systemd 服务"
@@ -1920,13 +2620,23 @@ verify_menu() {
 }
 
 cache_clean() {
-  local size
+  local size pip_cmd=""
   size="$(du -sh "${ROOT_HOME}/.cache/pip" 2>/dev/null | awk '{print $1}')"
   printf 'pip 缓存：%s\n' "${size:-未知}"
   if ask_yesno "清理 pip 缓存？" n; then
-    env_py -m pip cache purge 2>/dev/null || warn "pip cache purge 失败"
+    if env_ok; then
+      env_py -m pip cache purge 2>/dev/null || rm -rf -- "${ROOT_HOME}/.cache/pip"
+    else
+      pip_cmd="$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null || true)"
+      if [[ -n "${pip_cmd}" ]]; then
+        HOME="${ROOT_HOME}" "${pip_cmd}" cache purge 2>/dev/null || rm -rf -- "${ROOT_HOME}/.cache/pip"
+      else
+        rm -rf -- "${ROOT_HOME}/.cache/pip"
+      fi
+    fi
+    log "pip 缓存已清理"
   fi
-  if ask_yesno "清理 conda 包缓存？" n; then
+  if conda_ok && ask_yesno "清理 conda 包缓存？" n; then
     HOME="${ROOT_HOME}" "${CONDA_BIN}" clean -a -y 2>/dev/null || warn "conda clean 失败"
   fi
   if systemd_present && ask_yesno "只保留最近 7 天 journal 日志（影响全系统日志）？" n; then
@@ -1994,9 +2704,9 @@ draw_main_menu() {
   ui_sep
   ui_kv "GPU" "$(gpu_header)"
   ui_kv "磁盘" "$(disk_avail_gb) GB 可用"
-  ui_kv "Miniforge" "$(miniforge_ok && printf '已安装' || printf '未安装')"
+  ui_kv "Conda" "$(miniforge_ok && printf '已安装' || printf '未安装')"
   ui_kv "Python" "$(env_python_version)"
-  ui_kv "ComfyUI" "$(comfy_commit)"
+  ui_kv "ComfyUI" "$(comfy_summary)"
   ui_kv "PyTorch" "$(pip_version torch)"
   ui_kv "服务" "$(service_header)"
   ui_kv "访问" "$(current_access_mode):${PORT}"
@@ -2035,6 +2745,7 @@ main() {
   require_distro
   TMPD="$(mktemp -d /tmp/comfyui-tui.XXXXXX)" || die "创建临时目录失败"
   while :; do
+    discover_native_context
     draw_main_menu
     ask_main
     case "${MAIN_REPLY}" in

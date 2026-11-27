@@ -38,7 +38,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/Pathto18
 | 编号 | 功能 |
 |---|---|
 | `0` | 标准初始化 |
-| `1` | 换源说明，不执行第三方脚本 |
+| `1` | 系统换源（LinuxMirrors 第三方脚本） |
 | `2` | 系统更新与基础工具 |
 | `3` | 时区 |
 | `4` | 用户、密码、sudo 和密钥 |
@@ -68,7 +68,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/Pathto18
 ## 二、ComfyUI 部署脚本（`comfyui-tui.sh`）
 
 - **适用平台**：Ubuntu 22.04/24.04 一等支持（Debian 12/13 仅 NVIDIA 官方源路径，兼容未逐版本验证）。
-- **前置条件**：`x86_64`、`root`、交互终端、家目录可用空间建议 >=30GB（<10GB 中止）；GPU 模式要求 `nvidia-smi` CUDA Version >=13.0（驱动 >=580，不提供 `cu126` 回退），无 GPU 可选 CPU 测试模式。
+- **前置条件**：`x86_64`、`root`、交互终端、家目录可用空间建议 >=30GB（<10GB 中止）；GPU 模式要求 `nvidia-smi` CUDA Version >=13.0（驱动 >=580，不提供 `cu126` 回退），无 GPU 可选 CPU 测试模式。已配置过部分环境的机器会自动探测已有 ComfyUI 目录与 Python 环境（conda/venv），各子菜单可单独执行并按需升级驱动/PyTorch。
 - **访问与安全**：**默认 `--listen 0.0.0.0:8188`**，ComfyUI 无鉴权。需在云安全组放行 `8188/tcp`（建议限制来源为本人 IP/32）；UFW active 时标准部署会询问放行；菜单 `7` 可切换为仅回环 + SSH 隧道。
 
 ### 主菜单

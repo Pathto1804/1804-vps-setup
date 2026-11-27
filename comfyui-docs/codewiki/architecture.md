@@ -29,19 +29,19 @@ graph TD
 
 | 关心的东西 | 权威来源 |
 |---|---|
-| GPU / 驱动 / CUDA | `lspci`、`/dev/nvidia*`、`nvidia-smi`（名称、driver_version、CUDA Version） |
+| GPU / 驱动 / CUDA | `lspci`、`/dev/nvidia*`、`nvidia-smi`、`dpkg -S nvidia-smi`、`dpkg-query`、`apt-cache policy`、`ubuntu-drivers devices` |
 | 磁盘 | `df -Pk /root` |
-| Miniforge | `~/miniforge3/bin/conda --version` |
-| Python 环境 | `~/miniforge3/envs/comfyui/bin/python --version` |
-| ComfyUI | `~/ComfyUI/.git` + `git rev-parse` / `git branch` |
-| PyTorch | 环境内 `pip show torch` + `import torch`（终检才 import） |
+| Miniforge / Conda | `~/miniforge3`、`~/miniconda3`、`~/anaconda3`、`/opt/conda` 或 `PATH` 中的 `conda --version` |
+| Python 环境 | 已存在 unit/`start.d` 的 `ExecStart`、conda `comfyui`/`comfy` 环境、`COMFY_DIR/venv`、或本次进程手动切换的 `ENV_PY` |
+| ComfyUI | 已存在 unit/`start.d` 的工作目录、`~/ComfyUI`、常见数据盘目录（含 `main.py` 或 `.git`），或本次进程手动切换的 `COMFY_DIR` |
+| PyTorch | 当前 `ENV_PY` 内 `pip show torch` + `import torch`（终检才 import） |
 | 服务 | `/etc/systemd/system/comfyui.service` + `systemctl is-active/is-enabled`；或 `/start.d/comfyui.sh` |
 | 访问方式 | unit/start.d 的 `ExecStart` 是否含 `--listen` |
 | 端口 | `ss -tln`（先取全量再匹配，避免 SIGPIPE） |
 | 防火墙 | `ufw status` |
 | 公网 IP | 终检 `curl` 依次请求 `api.ipify.org` / `ifconfig.me` / `ipinfo.io/ip`；失败打印占位 |
 
-**没有项目私有状态文件**：不写 `comfyui.conf`、不写进度标记。用户输入（CPU/GPU、访问方式）只存在于本次进程；访问方式一旦写入 unit/start.d，下次从文件读回。
+**没有项目私有状态文件**：不写 `comfyui.conf`、不写进度标记。用户输入（CPU/GPU、访问方式、本次会话切换的 `COMFY_DIR` / `ENV_PY`）只存在于本次进程；服务、路径与访问方式一旦写入 unit/start.d，下次直接从原生系统文件探测读回。
 
 ## 运行时写入落点
 
