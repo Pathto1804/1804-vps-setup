@@ -21,7 +21,8 @@ touch "${COMFY_DIR}/main.py"
 printf '#!/usr/bin/env bash\nexit 0\n' > "${ENV_PY}"
 chmod +x "${ENV_PY}"
 
-# 模拟非 systemd：ps -p 1 -o comm= 返回 bash
+# 模拟非 systemd 容器环境（覆盖 /run/systemd/system 探测与 ps -p 1）
+systemd_present() { return 1; }
 make_mock_bin ps 'echo bash'
 
 cat > "${UNIT_FILE}" <<EOF
@@ -56,7 +57,8 @@ exec "${ENV_PY}" main.py --listen 127.0.0.1 --port 8188 --cpu-vae --preview-meth
 EOF
 
 assert_eq "$(current_access_mode)" "tunnel" "--listen 127.0.0.1 识别为 tunnel 模式"
-assert_rc 1 config_has_cpu "--cpu-vae 不应被误判为 --cpu"
+# --cpu-vae 不应被误判为 --cpu
+assert_rc 1 config_has_cpu
 extract_existing_extra_args
 assert_eq "${COMFY_EXTRA_ARGS[*]}" "--cpu-vae --preview-method auto" "正确剥离 --listen 127.0.0.1 与 --port 8188 并保留其余参数"
 
@@ -69,7 +71,8 @@ exec "${ENV_PY}" main.py --enable-manager --cpu
 EOF
 
 assert_eq "$(current_access_mode)" "tunnel" "注释里的 --listen 不干扰 tunnel 判定"
-assert_rc 0 config_has_cpu "精确匹配 --cpu 参数"
+# 精确匹配 --cpu 参数
+assert_rc 0 config_has_cpu
 
 # 4. 验证 tokenize_cmdline 引号与空格处理
 tokenize_cmdline "\"${ENV_PY}\" main.py --extra \"foo bar\" '--flag=a b'"

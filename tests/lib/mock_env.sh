@@ -57,15 +57,15 @@ assert_eq() {
 }
 
 assert_rc() {
-  local expected_rc="$1" msg="$2"
-  shift 2
+  local expected_rc="$1"
+  shift
   local rc=0
   "$@" >/dev/null 2>&1 || rc=$?
   if (( rc == expected_rc )); then
     TEST_PASS=$((TEST_PASS + 1))
   else
     TEST_FAIL=$((TEST_FAIL + 1))
-    printf 'FAIL: %s\n  got rc : %d\n  want rc: %d\n' "${msg}" "${rc}" "${expected_rc}" >&2
+    printf 'FAIL: %s\n  got rc : %d\n  want rc: %d\n' "$*" "${rc}" "${expected_rc}" >&2
   fi
 }
 

@@ -24,7 +24,8 @@ To                         Action      From
 EOF
 fi
 '
-assert_rc 1 fw_has_port "18188/tcp ALLOW 与 8188/tcp DENY 不应被误判为 8188 已放行"
+# 18188/tcp ALLOW 与 8188/tcp DENY 不应被误判为 8188 已放行
+assert_rc 1 fw_has_port
 
 make_mock_bin ufw '
 if [[ "${1:-}" == "status" ]]; then
@@ -37,7 +38,8 @@ To                         Action      From
 EOF
 fi
 '
-assert_rc 0 fw_has_port "8188/tcp ALLOW 应精确判定为已放行"
+# 8188/tcp ALLOW 应精确判定为已放行
+assert_rc 0 fw_has_port
 
 make_mock_bin ufw '
 case "${1:-}" in
@@ -45,7 +47,8 @@ case "${1:-}" in
   show)   echo "ufw allow 8188/tcp" ;;
 esac
 '
-assert_rc 0 fw_has_port "UFW inactive 时应回退 ufw show added 识别预写规则"
+# UFW inactive 时应回退 ufw show added 识别预写规则
+assert_rc 0 fw_has_port
 
 # 2. driver_apt_install_pkg 拒绝低于 580 的旧候选驱动
 make_mock_bin apt-cache '
@@ -55,7 +58,8 @@ nvidia-open:
   Candidate: 535.183.01-0ubuntu0.20.04.1
 EOF
 '
-assert_rc 1 driver_apt_install_pkg nvidia-open "候选驱动 535 (<580) 应被拒绝"
+# 候选驱动 535 (<580) 应被拒绝
+assert_rc 1 driver_apt_install_pkg nvidia-open
 
 # 3. install_base_packages 在缺包时先执行 apt-get update 再 install
 APT_LOG="${TEST_TMP}/apt.log"
