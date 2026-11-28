@@ -12,12 +12,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENTRY="00-tui.sh"
 COMFY_ENTRY="comfyui-tui.sh"
+TUNNEL_ENTRY="tunnel-tui.sh"
 RETIRED="01-base.sh 04-user.sh 05-ufw-ssh.sh 07-fail2ban.sh 08-swap.sh 09-bbr.sh 12-verify.sh"
 declare -i BAD=0
 
 # ---- 1. 入口存在；旧步骤脚本不得复活 ----
 [[ -f "${ENTRY}" ]] || { echo "❌ 缺少入口脚本：${ENTRY}"; BAD+=1; }
 [[ -f "${COMFY_ENTRY}" ]] || { echo "❌ 缺少入口脚本：${COMFY_ENTRY}"; BAD+=1; }
+[[ -f "${TUNNEL_ENTRY}" ]] || { echo "❌ 缺少入口脚本：${TUNNEL_ENTRY}"; BAD+=1; }
 for f in ${RETIRED}; do
   [[ -f "${f}" ]] && { echo "❌ 已退役的步骤脚本仍在：${f}（功能应已并入 ${ENTRY}）"; BAD+=1; }
 done
@@ -75,9 +77,9 @@ else
 fi
 
 # ---- 4. 项目私有状态文件不得复活 ----
-for f in "${ENTRY}" "${COMFY_ENTRY}"; do
+for f in "${ENTRY}" "${COMFY_ENTRY}" "${TUNNEL_ENTRY}"; do
   [[ -f "${f}" ]] || continue
-  if grep -nE '/root/\.(vps-init|comfyui-tui)\.conf' "${f}" >/dev/null 2>&1; then
+  if grep -nE '(/root/|~/)\.(vps-init|comfyui-tui|tunnel-tui)\.conf' "${f}" >/dev/null 2>&1; then
     echo "❌ ${f} 引用了项目私有状态文件"
     BAD+=1
   fi

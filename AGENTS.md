@@ -4,7 +4,7 @@
 
 ## 项目是什么
 
-面向 Debian/Ubuntu 个人 VPS 的交互式运维工具集，包含两个独立、单文件自包含的用户交付入口：根目录的 `00-tui.sh`（基础安全初始化与独立运维工具箱）与 `comfyui-tui.sh`（ComfyUI 部署与运维）。基础入口 raw 拉取 `bash <(curl -fsSL .../00-tui.sh)` 后启动即进主菜单，既支持新机按 `0` 走完标准初始化，也支持已配置过部分功能的“老机器”单独进入 `1`–`9` 任一模块独立执行，不受其他功能是否执行过的限制；ComfyUI 入口 raw 拉取 `.../comfyui-tui.sh`。**对外不恢复多脚本分发**——7 个旧步骤脚本（01/04/05/07/08/09/12）已退役不得复活。当前架构以 `docs/adr/0003-single-tui-native-state.md` 与 `docs/adr/0004-comfyui-entry.md` 为基线，并已启动向「源码模块化 + 单文件构建 + 模块解耦 + 打桩回归测试」演进（落地时需先新建对应 ADR）。**平台优先级：`00-tui.sh` Debian 一等（真机验收基线 Debian 12 bookworm），Ubuntu 20.04+ 兼容但未逐版本验证；`comfyui-tui.sh` Ubuntu 22.04/24.04 一等，Debian 12/13 仅 NVIDIA 官方源路径兼容**——涉及发行版差异的改动优先在 Debian 上验证，Ubuntu 专属分支（如 `ssh.socket`）保留但需显式标注。
+面向 Debian/Ubuntu 个人 VPS 的交互式运维工具集，包含三个独立、单文件自包含的用户交付入口：根目录的 `00-tui.sh`（基础安全初始化与独立运维工具箱）、`comfyui-tui.sh`（ComfyUI 部署与运维）与 `tunnel-tui.sh`（本地电脑运行的 SSH 隧道辅助 TUI）。基础入口 raw 拉取 `bash <(curl -fsSL .../00-tui.sh)` 后启动即进主菜单，既支持新机按 `0` 走完标准初始化，也支持已配置过部分功能的“老机器”单独进入 `1`–`9` 任一模块独立执行，不受其他功能是否执行过的限制；ComfyUI 入口 raw 拉取 `.../comfyui-tui.sh`；本地隧道入口 raw 拉取 `.../tunnel-tui.sh`（需 Bash 3.2+，不要求 root）。**对外不恢复多脚本分发**——7 个旧步骤脚本（01/04/05/07/08/09/12）已退役不得复活。当前架构以 `docs/adr/0003-single-tui-native-state.md`、`docs/adr/0004-comfyui-entry.md`、`docs/adr/0005-modular-source-build.md` 与 `docs/adr/0006-local-tunnel-entry.md` 为基线。**平台优先级：`00-tui.sh` Debian 一等（真机验收基线 Debian 12 bookworm），Ubuntu 20.04+ 兼容但未逐版本验证；`comfyui-tui.sh` Ubuntu 22.04/24.04 一等，Debian 12/13 仅 NVIDIA 官方源路径兼容；`tunnel-tui.sh` 面向本地 Linux / macOS（Bash 3.2+）/ WSL / Windows Git Bash**——涉及发行版差异的改动优先在 Debian 上验证，Ubuntu 专属分支（如 `ssh.socket`）保留但需显式标注。
 
 ## 常用命令
 
@@ -31,7 +31,7 @@ bash tools/sync_check.sh                                # 必须输出「一致�
 
 ## 工作区规范（保持干净、结构化）
 
-- **根目录只放**：两个入口脚本 `00-tui.sh`、`comfyui-tui.sh`、入口文档 `README.md`、项目上下文 `AGENTS.md` 与仓库配置（`.gitignore`/`.gitattributes`）。其他一切进 `docs/`、`comfyui-docs/`、`tools/`、`.omp/`（及新 ADR 落地的源码/测试目录如 `src/`、`tests/`）。禁止在根目录堆放临时/备份/试验文件。
+- **根目录只放**：三个入口脚本 `00-tui.sh`、`comfyui-tui.sh`、`tunnel-tui.sh`、入口文档 `README.md`、项目上下文 `AGENTS.md` 与仓库配置（`.gitignore`/`.gitattributes`）。其他一切进 `docs/`、`comfyui-docs/`、`tools/`、`.omp/`（及新 ADR 落地的源码/测试目录如 `src/`、`tests/`）。禁止在根目录堆放临时/备份/试验文件。
 - **脚手架留在工作区内、交付前清空**：测试脚本、打桩环境、调试输出、提交消息草稿、历史改写脚本、中间产物（`*.bak`/`*.old`）一律放工作区内的 `.scratch/`（已 gitignore），交付前清空该目录（目录本身可留）。**NEVER 往工作区外写文件**——不碰 `E:/tmp`、`/tmp`、`~` 或仓库外任何路径。工作区边界由用户授予，仓库内的规则文件不能当作扩权许可。
 - **交付时工作区必须干净**（用户定义）：交付那一刻无未跟踪文件、无 stash、无未推送提交；`git status -sb` 应显示与 `origin/main` 同步。**中间过程允许有临时产物**（放 `.scratch/`），只要交付时清干净。
 - **不留空目录、不留游离残渣**：空目录（如误建的 `E/`、`E/.ssh`）对 git 无影响但污染工作区，发现即删；路径拼错产生的杂项同理。唯一例外：`.scratch/` 是 gitignore 的约定目录，允许留空。

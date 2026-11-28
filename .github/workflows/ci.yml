@@ -19,13 +19,14 @@ jobs:
         run: |
           bash -n 00-tui.sh
           bash -n comfyui-tui.sh
+          bash -n tunnel-tui.sh
           bash -n tools/build.sh
           bash -n tools/sync_check.sh
           bash -n tests/run.sh
           for f in tests/lib/*.sh tests/test_*.sh; do bash -n "$f"; done
 
       - name: ShellCheck
-        run: shellcheck -S warning 00-tui.sh comfyui-tui.sh tools/build.sh tools/sync_check.sh tests/run.sh tests/lib/*.sh tests/test_*.sh
+        run: shellcheck -S warning 00-tui.sh comfyui-tui.sh tunnel-tui.sh tools/build.sh tools/sync_check.sh tests/run.sh tests/lib/*.sh tests/test_*.sh
 
       - name: Sync check
         run: bash tools/sync_check.sh
